@@ -136,7 +136,7 @@ export default function App() {
     const apply = () => {
       const resolved = settings.theme === "system" ? (media.matches ? "dark" : "light") : settings.theme;
       document.documentElement.dataset.theme = resolved;
-      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#101317" : "#f4f1ea");
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#0a0a0a" : "#fdfdfd");
     };
     apply();
     media.addEventListener("change", apply);

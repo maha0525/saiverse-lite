@@ -149,10 +149,30 @@ parser's rules:
 - accept text, multimodal text, code, and supported tool-result text
 - preserve timestamps and conversation IDs
 
-No Claude official export sample exists in the repository available to this implementation.
-The Claude adapter boundary therefore exists but intentionally rejects data with a clear
-“schema verification required” error. It must not guess that a same-named
-`conversations.json` is ChatGPT-compatible. See `HANDOFF.md`.
+The Claude adapter follows the schema **verified against a real official export on
+2026-07-15** (94 conversations). It is NOT ChatGPT-compatible despite the same file name:
+
+- top level is an array of conversations
+  `{ uuid, name, summary, created_at, updated_at, account, chat_messages }`
+- `chat_messages` is a flat chronological array
+  `{ uuid, sender: "human" | "assistant", text, content: [...], created_at, updated_at,
+  parent_message_uuid, attachments, files }` — no `mapping` tree, no `current_node`
+- timestamps are full ISO 8601 with `Z` (UTC)
+- `content` parts are typed `text | tool_use | tool_result | thinking | flag`.
+  The **`text` field is the complete visible text** and is broader than the joined
+  `text` parts on tool-using turns; the adapter prefers `text` and falls back to
+  joining `text` parts. `thinking` / `tool_use` / `tool_result` parts are not imported.
+- `attachments` / `files` are not imported (counted and logged)
+
+`memories.json` in the same export
+(`[{ conversations_memory, project_memories: { <uuid>: text }, account_uuid }]`) is
+Claude's own long-term memory of the user. `extractClaudeMemories` converts it into
+persona-wide `MemoryEntry(kind="note")` rows with deterministic ids
+(`memory_import_claude_conv_<n>` / `memory_import_claude_proj_<uuid>`), so re-imports
+overwrite instead of duplicating.
+
+Imported message ids are deterministic for both sources
+(`message_import_<source>_<sourceId>`), making conversation re-imports idempotent.
 
 ## 6. Versioning rules
 

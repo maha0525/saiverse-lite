@@ -18,7 +18,7 @@ import {
   type ProviderConfig,
 } from "./domain";
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
-import { ChatGptExportAdapter, ClaudeExportAdapter, saveImportedConversations } from "./importers";
+import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, saveImportedConversations } from "./importers";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
 
@@ -266,7 +266,27 @@ export default function App() {
       onImportBackup={(file) => runDataAction(async () => { if (!window.confirm("現在の端末内データをバックアップ内容で置き換えますか？")) return "復元をキャンセルしました。"; await repository.replaceSnapshot(parseFullBackup(JSON.parse(await file.text()))); await refreshBase(); return "バックアップを復元しました。APIキーは再入力してください。"; })}
       onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); for (const thread of imported.threads) await repository.putThread(thread); for (const message of imported.messages) await repository.putMessage(message); for (const memory of imported.memories) await repository.putMemory(memory); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
       onImportChatGpt={(file) => runDataAction(async () => { const conversations = await new ChatGptExportAdapter().parse(file); const result = await saveImportedConversations(repository, selectedPersona, conversations); await loadPersonaData(selectedPersona.id); return `${result.threads}会話、${result.messages}発言を取り込みました。`; })}
-      onImportClaude={(file) => runDataAction(async () => { await new ClaudeExportAdapter().parse(file); return ""; })}
+      onImportClaude={(file) => runDataAction(async () => {
+        const conversations = await new ClaudeExportAdapter().parse(file);
+        const result = await saveImportedConversations(repository, selectedPersona, conversations);
+        const memoryTexts = await extractClaudeMemories(file);
+        const now = Date.now();
+        for (const memory of memoryTexts) {
+          await repository.putMemory({
+            id: memory.id,
+            personaId: selectedPersona.id,
+            threadId: null,
+            kind: "note",
+            content: memory.text,
+            sourceMessageIds: [],
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+        await loadPersonaData(selectedPersona.id);
+        const memoryNote = memoryTexts.length ? `、Claude の記憶 ${memoryTexts.length} 件` : "";
+        return `${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`;
+      })}
     />;
     return <SettingsView providers={providers} settings={settings} canInstall={installPrompt !== null} onInstall={async () => { if (!installPrompt) return; await installPrompt.prompt(); const choice = await installPrompt.userChoice; if (choice.outcome === "accepted") setInstallPrompt(null); }} onSaveProvider={async (provider) => { await repository.putProvider(provider); setProviders(await repository.listProviders()); }} onDeleteProvider={async (id) => {
       const users = personas.filter((persona) => persona.providerId === id);

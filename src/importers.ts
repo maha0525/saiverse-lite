@@ -31,13 +31,6 @@ export interface OfficialExportAdapter {
   parse(file: File): Promise<ImportedConversation[]>;
 }
 
-export class UnverifiedClaudeSchemaError extends Error {
-  constructor() {
-    super("Claude 公式エクスポートは実データのスキーマ検証が必要です。推測で取り込みません。");
-    this.name = "UnverifiedClaudeSchemaError";
-  }
-}
-
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -136,7 +129,7 @@ function buildConversation(raw: Record<string, unknown>): ImportedConversation {
   };
 }
 
-async function chatGptPayloads(file: File): Promise<Record<string, unknown>[]> {
+async function conversationsPayloads(file: File): Promise<Record<string, unknown>[]> {
   let payloads: unknown[] = [];
   if (file.name.toLowerCase().endsWith(".zip")) {
     const zip = await JSZip.loadAsync(await file.arrayBuffer());
@@ -161,7 +154,7 @@ async function chatGptPayloads(file: File): Promise<Record<string, unknown>[]> {
 export class ChatGptExportAdapter implements OfficialExportAdapter {
   readonly source = "chatgpt" as const;
   async parse(file: File): Promise<ImportedConversation[]> {
-    const payloads = await chatGptPayloads(file);
+    const payloads = await conversationsPayloads(file);
     const conversations = payloads.map(buildConversation);
     console.log("[SAIVerse Lite][import] ChatGPT export parsed", {
       files: file.name,
@@ -172,11 +165,105 @@ export class ChatGptExportAdapter implements OfficialExportAdapter {
   }
 }
 
+// Claude 公式エクスポートの実スキーマ (2026-07-15 実データで検証):
+// 最上位は会話の配列 { uuid, name, summary, created_at(ISO+Z), updated_at, account, chat_messages }。
+// chat_messages は時系列のフラット配列 { uuid, sender: "human"|"assistant", text,
+// content: [{ type: "text"|"tool_use"|"tool_result"|"thinking"|"flag", ... }],
+// created_at, updated_at, parent_message_uuid, attachments, files }。
+// 可視テキストの完全形は `text` フィールド (ツール使用ターンでは content の text 部品より広い)。
+function claudeMessageText(message: Record<string, unknown>): string {
+  if (typeof message.text === "string" && message.text.trim()) return message.text.trim();
+  const parts = Array.isArray(message.content) ? message.content : [];
+  return parts.flatMap((part) => {
+    const partRecord = record(part);
+    return partRecord?.type === "text" && typeof partRecord.text === "string" ? [partRecord.text] : [];
+  }).join("\n").trim();
+}
+
+function buildClaudeConversation(raw: Record<string, unknown>): ImportedConversation {
+  const title = typeof raw.name === "string" && raw.name ? raw.name : "(untitled)";
+  const messages: ImportedMessage[] = [];
+  const chat = Array.isArray(raw.chat_messages) ? raw.chat_messages : [];
+  let attachmentsSkipped = 0;
+  for (const value of chat) {
+    const message = record(value);
+    if (!message) continue;
+    const role = message.sender === "human" ? "user" : message.sender === "assistant" ? "assistant" : null;
+    if (!role) continue;
+    const content = claudeMessageText(message);
+    if (!content) continue;
+    if (Array.isArray(message.attachments) && message.attachments.length) attachmentsSkipped += message.attachments.length;
+    if (Array.isArray(message.files) && message.files.length) attachmentsSkipped += message.files.length;
+    messages.push({
+      sourceId: typeof message.uuid === "string" ? message.uuid : `${title}_${messages.length}`,
+      role,
+      content,
+      createdAt: epochMillis(message.created_at),
+      metadata: {},
+    });
+  }
+  if (attachmentsSkipped > 0) console.log("[SAIVerse Lite][import] Claude attachments/files are not imported", { conversation: title, skipped: attachmentsSkipped });
+  return {
+    source: "claude",
+    id: typeof raw.uuid === "string" ? raw.uuid : title,
+    title,
+    createdAt: epochMillis(raw.created_at),
+    updatedAt: epochMillis(raw.updated_at),
+    messages,
+  };
+}
+
 export class ClaudeExportAdapter implements OfficialExportAdapter {
   readonly source = "claude" as const;
-  async parse(_file: File): Promise<ImportedConversation[]> {
-    throw new UnverifiedClaudeSchemaError();
+  async parse(file: File): Promise<ImportedConversation[]> {
+    const payloads = await conversationsPayloads(file);
+    const conversations = payloads.map(buildClaudeConversation);
+    console.log("[SAIVerse Lite][import] Claude export parsed", {
+      files: file.name,
+      conversations: conversations.length,
+      messages: conversations.reduce((sum, item) => sum + item.messages.length, 0),
+    });
+    return conversations;
   }
+}
+
+export interface ClaudeMemoryText {
+  id: string;
+  text: string;
+}
+
+// memories.json: [{ conversations_memory: string, project_memories: { <uuid>: string }, account_uuid }]
+// Claude 本体が保持していた「関係の記憶」。取り込み ID は決定論 (再インポートで重複しない)。
+export async function extractClaudeMemories(file: File): Promise<ClaudeMemoryText[]> {
+  let payload: unknown = null;
+  if (file.name.toLowerCase().endsWith(".zip")) {
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const entry = Object.values(zip.files).find((item) => !item.dir && /(^|\/)memories\.json$/.test(item.name));
+    if (!entry) return [];
+    payload = JSON.parse(await entry.async("string"));
+  } else if (/(^|\/)memories\.json$/.test(file.name.toLowerCase())) {
+    payload = JSON.parse(await file.text());
+  } else {
+    return [];
+  }
+  if (!Array.isArray(payload)) return [];
+  const texts: ClaudeMemoryText[] = [];
+  payload.forEach((value, accountIndex) => {
+    const account = record(value);
+    if (!account) return;
+    if (typeof account.conversations_memory === "string" && account.conversations_memory.trim()) {
+      texts.push({ id: `memory_import_claude_conv_${accountIndex}`, text: account.conversations_memory.trim() });
+    }
+    const projects = record(account.project_memories);
+    if (projects) {
+      for (const [projectId, text] of Object.entries(projects)) {
+        if (typeof text === "string" && text.trim()) {
+          texts.push({ id: `memory_import_claude_proj_${projectId.replace(/[^a-zA-Z0-9_-]/g, "_")}`, text: text.trim() });
+        }
+      }
+    }
+  });
+  return texts;
 }
 
 export async function saveImportedConversations(
@@ -203,7 +290,9 @@ export async function saveImportedConversations(
       const imported = conversation.messages[index];
       if (!imported || (imported.role !== "user" && imported.role !== "assistant")) continue;
       const message: ChatMessage = {
-        id: newId("message"),
+        id: imported.sourceId
+          ? `message_import_${conversation.source}_${imported.sourceId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+          : newId("message"),
         threadId,
         personaId: persona.id,
         role: imported.role,

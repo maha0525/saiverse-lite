@@ -68,21 +68,34 @@ describe("provider transports", () => {
     expect(generateBody.systemInstruction).toBeUndefined();
   });
 
-  it("sets Anthropic browser and explicit-cache headers/blocks", async () => {
+  it("sends no cache_control by default (cache is opt-in)", async () => {
+    let captured: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      captured = init;
+      return new Response(`event: message_stop\ndata: {"type":"message_stop"}\n\n`, { status: 200 });
+    }));
+    for await (const _event of new AnthropicProvider(config("anthropic")).stream(request([user("hello")]))) { /* drain */ }
+    expect(String(captured?.body)).not.toContain("cache_control");
+    expect(new Headers(captured?.headers).get("anthropic-beta")).toBeNull();
+  });
+
+  it("sets Anthropic browser header and both cache breakpoints when TTL is chosen", async () => {
     let captured: RequestInit | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       captured = init;
       return new Response(`event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`, { status: 200 });
     }));
     const events = [];
-    for await (const event of new AnthropicProvider(config("anthropic")).stream(request([user("hello")]))) events.push(event);
+    const cachedConfig = { ...config("anthropic"), anthropicCacheTtl: "1h" as const };
+    for await (const event of new AnthropicProvider(cachedConfig).stream(request([user("hello")]))) events.push(event);
     const headers = new Headers(captured?.headers);
     expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
+    expect(headers.get("anthropic-beta")).toBe("extended-cache-ttl-2025-04-11");
     const body = JSON.parse(String(captured?.body)) as { system: Array<Record<string, unknown>>; messages: Array<{ content: Array<Record<string, unknown>> | string }> };
-    expect(body.system[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(body.system[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     // 履歴末尾にもキャッシュ打点 (会話全体が次ターンでキャッシュ読みになる)
     const lastContent = body.messages[body.messages.length - 1]?.content;
-    expect(Array.isArray(lastContent) ? lastContent[lastContent.length - 1]?.cache_control : undefined).toEqual({ type: "ephemeral" });
+    expect(Array.isArray(lastContent) ? lastContent[lastContent.length - 1]?.cache_control : undefined).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(events).toContainEqual({ type: "text", text: "hi" });
   });
 

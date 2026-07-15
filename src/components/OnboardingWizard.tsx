@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, Check, Globe, Import, KeyRound, Sparkles } from 
 import { useEffect, useMemo, useRef, useState } from "react";
 import logoUrl from "../assets/logo.png";
 import { API_KEY_GUIDES, type GuideProviderId } from "../apiKeyGuideData";
-import { newId, type Persona, type ProviderConfig } from "../domain";
+import { newId, type AnthropicCacheTtl, type Persona, type ProviderConfig } from "../domain";
 import { importChatGptFile, importClaudeFile, type OfficialImportResult } from "../importers";
 import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
 import {
@@ -182,6 +182,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
         apiKey: drafts.apiKey.trim(),
         defaultModel: drafts.model.trim(),
         geminiAutoCache: true,
+        anthropicCacheTtl: drafts.providerChoice === "anthropic" ? drafts.anthropicCacheTtl : "none",
         createdAt: now,
         updatedAt: now,
         ...defaults,
@@ -366,6 +367,16 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
                 <ApiKeyGuide guide={guide} />
                 <label className="field"><span>APIキー <KeyRound size={12} aria-hidden="true" /></span><input type="password" autoComplete="off" value={drafts.apiKey} onChange={(event) => { setTestResult(null); patchDrafts({ apiKey: event.target.value }); }} placeholder={guide.keyPrefixHint} /></label>
                 <label className="field"><span>モデルID (おすすめを入れてあります)</span><input value={drafts.model} onChange={(event) => patchDrafts({ model: event.target.value })} /></label>
+                {drafts.providerChoice === "anthropic" && (
+                  <label className="field"><span>プロンプトキャッシュ (費用を抑える設定)</span>
+                    <select value={drafts.anthropicCacheTtl} onChange={(event) => patchDrafts({ anthropicCacheTtl: event.target.value as AnthropicCacheTtl })}>
+                      <option value="none">なし (あとで設定から変えられます)</option>
+                      <option value="5m">5分キャッシュ — テンポよく話す人向け</option>
+                      <option value="1h">1時間キャッシュ — ゆっくり話す人向け</option>
+                    </select>
+                    <span className="field-help">設定時間内に返信すると履歴の再送が約1/10価格に。書き込みは割増 (5分=1.25倍/1時間=2倍) なので、返信間隔が設定時間を超えがちなら「なし」が安全です。</span>
+                  </label>
+                )}
                 <div className="wizard-actions">
                   <button className="button secondary" disabled={busy || !drafts.apiKey.trim()} onClick={() => void runConnectionTest()}>{busy ? "確認中…" : "接続テスト"}</button>
                   {testResult && <span className={testResult.ok ? "status-chip good" : "status-chip"} role="status">{testResult.ok && <Check size={13} aria-hidden="true" />} {testResult.message}</span>}

@@ -21,16 +21,16 @@ function anthropicMessages(messages: ProviderMessage[]): Array<Record<string, un
 }
 
 // 会話履歴の末尾にキャッシュ打点を置く。次のターンは「ツール定義+システム+記憶+履歴全体」が
-// キャッシュ読み (約1/10価格) になり、増分だけが新規書き込みになる — Anthropic を会話用途で
-// 成立させる要 (システムプロンプト側の打点と合わせて 2/4 打点を使用)。
-function markHistoryCacheBreakpoint(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+// キャッシュ読み (約1/10価格) になり、増分だけが新規書き込みになる
+// (システムプロンプト側の打点と合わせて 2/4 打点を使用)。
+function markHistoryCacheBreakpoint(messages: Array<Record<string, unknown>>, cacheControl: Record<string, unknown>): Array<Record<string, unknown>> {
   const last = messages[messages.length - 1];
   if (!last) return messages;
   if (typeof last.content === "string" && last.content) {
-    last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
+    last.content = [{ type: "text", text: last.content, cache_control: cacheControl }];
   } else if (Array.isArray(last.content) && last.content.length > 0) {
     const block = last.content[last.content.length - 1] as Record<string, unknown>;
-    block.cache_control = { type: "ephemeral" };
+    block.cache_control = cacheControl;
   }
   return messages;
 }
@@ -41,22 +41,33 @@ export class AnthropicProvider implements LlmProvider {
   constructor(readonly config: ProviderConfig) {}
 
   async *stream(request: ProviderRequest): AsyncGenerator<ProviderEvent> {
-    const system: Array<Record<string, unknown>> = [{ type: "text", text: request.systemPrompt, cache_control: { type: "ephemeral" } }];
+    // キャッシュは明示設定時のみ (既定 none)。書き込み割増 (5m=1.25倍/1h=2倍) があるため、
+    // 返信間隔が TTL を超える使い方では黙って有効化すると逆に割高になる。
+    const ttl = this.config.anthropicCacheTtl ?? "none";
+    const cacheControl = ttl === "none" ? null : ttl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+    const system: Array<Record<string, unknown>> = [
+      cacheControl
+        ? { type: "text", text: request.systemPrompt, cache_control: cacheControl }
+        : { type: "text", text: request.systemPrompt },
+    ];
     if (request.memoryContext) system.push({ type: "text", text: `【長期記憶】\n${request.memoryContext}` });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "x-api-key": this.config.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    };
+    if (ttl === "1h") headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11";
+    const baseMessages = anthropicMessages(request.messages);
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/messages`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.config.apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
+      headers,
       body: JSON.stringify({
         model: request.model,
         max_tokens: 4096,
         stream: true,
         system,
-        messages: markHistoryCacheBreakpoint(anthropicMessages(request.messages)),
+        messages: cacheControl ? markHistoryCacheBreakpoint(baseMessages, cacheControl) : baseMessages,
         tools: request.tools.map((tool) => ({ name: tool.id, description: tool.description, input_schema: tool.inputSchema })),
         tool_choice: { type: request.toolChoice },
       }),

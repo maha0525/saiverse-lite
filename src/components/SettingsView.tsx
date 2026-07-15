@@ -1,6 +1,6 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import { newId, type AppSettings, type ProviderConfig, type ProviderKind } from "../domain";
+import { newId, type AnthropicCacheTtl, type AppSettings, type ProviderConfig, type ProviderKind } from "../domain";
 import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
 import { THIRD_PARTY_LICENSES } from "../thirdPartyLicenses";
 import { LegalModal } from "./LegalModal";
@@ -74,6 +74,11 @@ export function SettingsView(props: SettingsViewProps) {
           <label className="field"><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} required /></label>
           <div className="field-grid"><label className="field"><span>会話モデルID</span><input value={draft.defaultModel} onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })} required /></label><label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /></label></div>
           {draft.kind === "gemini" && <label className="toggle"><input type="checkbox" checked={draft.geminiAutoCache} onChange={(event) => setDraft({ ...draft, geminiAutoCache: event.target.checked })} /><span><strong>Gemini 自動キャッシュ</strong><small>create → generate → delete。短い入力は通常コールへ戻します。</small></span></label>}
+          {draft.kind === "anthropic" && <label className="field"><span>プロンプトキャッシュ</span><select value={draft.anthropicCacheTtl ?? "none"} onChange={(event) => setDraft({ ...draft, anthropicCacheTtl: event.target.value as AnthropicCacheTtl })}>
+            <option value="none">なし (既定)</option>
+            <option value="5m">5分キャッシュ — テンポよく話す人向け</option>
+            <option value="1h">1時間キャッシュ — ゆっくり話す人向け</option>
+          </select><span className="field-help">設定時間内に次の返信をすると、履歴の再送が約1/10価格になります。書き込みは割増 (5分=1.25倍/1時間=2倍) のため、返信間隔が設定時間を超えがちだと逆に割高です。</span></label>}
           <div className="form-actions"><button className="button" type="submit">プロバイダを保存</button><button className="button secondary" type="button" onClick={() => { const provider = newProvider("openai"); setDraft(provider); setSelectedId(provider.id); }}>新規追加</button>{draft.id !== "provider_mock" && props.providers.some((item) => item.id === draft.id) && <button className="text-button danger" type="button" onClick={() => void props.onDeleteProvider(draft.id)}>削除</button>}</div>
         </form>
         <form className="panel form-panel" onSubmit={(event) => void submitSettings(event)}>

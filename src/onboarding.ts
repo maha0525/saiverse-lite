@@ -1,6 +1,6 @@
 // 初回導線の状態と部品。進捗 (画面・分岐・入力ドラフト) は入力のたびに端末へ保存され、
 // 途中で閉じても続きから再開できる。事故による書きかけ消失を防ぐのが目的。
-import type { ProviderConfig } from "./domain";
+import type { AnthropicCacheTtl, ProviderConfig } from "./domain";
 import { createProvider } from "./llm";
 
 export type WizardStep = "welcome" | "consent" | "fork" | "path" | "brain" | "done";
@@ -14,6 +14,7 @@ export interface OnboardingDrafts {
   providerChoice: "gemini" | "openai" | "anthropic" | "later" | null;
   apiKey: string;
   model: string;
+  anthropicCacheTtl: AnthropicCacheTtl;
   personaId: string | null;
 }
 
@@ -26,7 +27,7 @@ export interface OnboardingState {
 export const EMPTY_ONBOARDING: OnboardingState = {
   completed: false,
   step: "welcome",
-  drafts: { fork: null, personaName: "", personaPrompt: "", templateId: null, providerChoice: null, apiKey: "", model: "", personaId: null },
+  drafts: { fork: null, personaName: "", personaPrompt: "", templateId: null, providerChoice: null, apiKey: "", model: "", anthropicCacheTtl: "none", personaId: null },
 };
 
 const STORAGE_KEY = "saiverse-lite.onboarding.v1";

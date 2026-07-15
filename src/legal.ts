@@ -41,7 +41,7 @@ export const PRIVACY_POLICY: LegalDocument = {
     },
     {
       heading: "お問い合わせ",
-      body: "本ポリシーに関する質問は GitHub リポジトリ (github.com/maha0525/saiverse-lite) の Issues までお寄せください。",
+      body: "本ポリシーに関する質問は https://github.com/maha0525/saiverse-lite/issues までお寄せください。",
     },
   ],
 };
@@ -72,7 +72,7 @@ export const TERMS_OF_USE: LegalDocument = {
     },
     {
       heading: "ソースコードとライセンス",
-      body: "本アプリのソースコードは AGPL v3 の下で github.com/maha0525/saiverse-lite にて公開されています。設定画面の「このアプリについて」から、動作中のバージョンに対応するソースコードとサードパーティライセンス一覧を確認できます。",
+      body: "本アプリのソースコードは AGPL v3 の下で https://github.com/maha0525/saiverse-lite にて公開されています。ライセンス全文: https://www.gnu.org/licenses/agpl-3.0.html （日本語の参考訳も各所にあります）。設定画面の「このアプリについて」から、動作中のバージョンに対応するソースコードとサードパーティライセンス一覧を確認できます。",
     },
     {
       heading: "規約の変更",

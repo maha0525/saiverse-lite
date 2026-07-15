@@ -1,5 +1,15 @@
 import { X } from "lucide-react";
+import type { ReactNode } from "react";
 import type { LegalDocument } from "../legal";
+
+// 本文中の URL をクリック可能にする
+function linkify(body: string): ReactNode[] {
+  return body.split(/(https?:\/\/[^\s、。()]+)/g).map((part, index) =>
+    /^https?:\/\//.test(part)
+      ? <a key={index} href={part} target="_blank" rel="noreferrer noopener">{part}</a>
+      : part,
+  );
+}
 
 export function LegalModal({ document, onClose }: { document: LegalDocument; onClose(): void }) {
   return (
@@ -13,7 +23,7 @@ export function LegalModal({ document, onClose }: { document: LegalDocument; onC
         {document.sections.map((section) => (
           <section key={section.heading}>
             <h3>{section.heading}</h3>
-            <p>{section.body}</p>
+            <p>{linkify(section.body)}</p>
           </section>
         ))}
       </div>

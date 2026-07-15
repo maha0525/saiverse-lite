@@ -41,19 +41,19 @@ export const API_KEY_GUIDES: Record<GuideProviderId, ApiKeyGuideData> = {
     id: "gemini",
     name: "Google Gemini",
     tagline: "無料枠あり・クレジットカード不要。はじめての1本におすすめ。",
-    costNote: "無料枠の範囲なら 0 円で使えます (回数制限あり)。有料でも軽量モデルなら 1 往復あたり数円以下が目安です。",
-    recommendedModel: "gemini-2.5-flash",
+    costNote: "はじめは 0 円で使えます。無料か有料かは API キーごとに最初から決まっていて (下の折りたたみを参照)、請求先を設定していないキーで課金が始まることはありません。推奨の Gemini 3.5 Flash は日本語の会話がとても自然で、無料キーで 1日 20 往復まで話せます (目安)。",
+    recommendedModel: "gemini-3.5-flash",
     keyPrefixHint: "AIza で始まる文字列",
     steps: [
       {
         title: "Google AI Studio を開く",
         detail: "お使いの Google アカウントでログインします。新しいアカウントを作る必要はありません。",
-        link: { label: "aistudio.google.com/apikey を開く", url: "https://aistudio.google.com/apikey" },
+        link: { label: "aistudio.google.com/api-keys を開く", url: "https://aistudio.google.com/api-keys" },
       },
       {
-        title: "API キーを作成する",
-        detail: "ボタンを押すとキーが作られます。プロジェクトを聞かれたら、そのまま既定の選択で大丈夫です。",
-        uiLabel: "APIキーを作成 / Create API key",
+        title: "プロジェクトを作って、API キーを作成する",
+        detail: "「APIキーを作成」を押し、プロジェクトの選択では「プロジェクトを作成」を選んで好きな名前をつけます。そのまま「キーを作成」でキーができます。",
+        uiLabel: "APIキーを作成 → プロジェクトを作成 → キーを作成",
       },
       {
         title: "キーをコピーする",
@@ -65,7 +65,17 @@ export const API_KEY_GUIDES: Record<GuideProviderId, ApiKeyGuideData> = {
         detail: "下の入力欄に貼り付けて、接続テストを押してください。",
       },
     ],
-    cautions: [...COMMON_CAUTIONS, "無料枠は Google 側の都合で変わることがあります。"],
+    tips: [
+      {
+        title: "無料と有料は「キーごと」に最初から決まっています",
+        body: "Gemini の API キーはプロジェクトという入れ物に属していて、そのプロジェクトに請求先 (支払い方法) が結びついているかどうかで、そのキーが無料か有料かが決まります。請求先を設定していないキーは、どれだけ使っても課金されません — 無料枠の上限に達すると、その日はエラーで止まるだけです。目安: 推奨の Gemini 3.5 Flash は 1日 20 往復。Gemini 3.1 Flash-Lite なら 1日 500 往復まで無料ですが、会話の知性は控えめで、パートナー用途にはおすすめしません。上限や対象モデルは Google 側の都合で変わることがあります。",
+      },
+      {
+        title: "有料枠 (回数制限なし) にしたくなったら",
+        body: "API キーの一覧で、そのキーの「お支払い情報を設定」を押すと「Cloud 請求先アカウントの設定」が開きます。「新しい請求先アカウントを追加」から連絡先とお支払い方法 (クレジットカード) を登録して続行すると、そのキーは有料 (Tier 1〜) になります。設定した時点から、そのキーでの会話には課金が発生します。最近の Gemini の支払いは前払いクレジット方式が基本です。有料でも Flash 系なら 1 往復あたり数円以下が目安で、このアプリの Gemini 自動キャッシュが入力コストをさらに抑えます。",
+      },
+    ],
+    cautions: COMMON_CAUTIONS,
   },
   openai: {
     id: "openai",

@@ -66,6 +66,11 @@ export function completeOnboarding(storage: StorageLike | null = defaultStorage(
   storage?.setItem(STORAGE_KEY, JSON.stringify({ ...structuredClone(EMPTY_ONBOARDING), completed: true, step: "done" }));
 }
 
+/** 「はじめかたガイドをもう一度」用: 進捗を最初に戻す (同意記録は settings 側なので消えない) */
+export function resetOnboarding(storage: StorageLike | null = defaultStorage()): void {
+  storage?.setItem(STORAGE_KEY, JSON.stringify(structuredClone(EMPTY_ONBOARDING)));
+}
+
 // ---- 汎用ドラフト保存 (composer / ペルソナフォーム) --------------------------------
 
 const DRAFT_PREFIX = "saiverse-lite.draft.";

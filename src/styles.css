@@ -227,6 +227,9 @@ textarea { resize: vertical; line-height: 1.6; }
 .guide-step-body p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
 .guide-ui-label { padding: 4px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-3); font-size: 12px; font-weight: 600; }
 .guide-link { display: inline-flex; align-items: center; gap: 5px; color: var(--accent-strong); font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.guide-tip { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 12px 14px; }
+.guide-tip summary { cursor: pointer; font-weight: 600; color: var(--accent-strong); font-size: 13px; }
+.guide-tip p { margin: 10px 0 8px; color: var(--muted); font-size: 13px; line-height: 1.8; }
 .guide-cautions { display: grid; gap: 5px; }
 .guide-cautions p { margin: 0; display: flex; gap: 6px; align-items: flex-start; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .guide-cautions svg { flex: 0 0 auto; margin-top: 2px; }

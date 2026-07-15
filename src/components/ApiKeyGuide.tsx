@@ -24,6 +24,17 @@ export function ApiKeyGuide({ guide }: { guide: ApiKeyGuideData }) {
           </li>
         ))}
       </ol>
+      {guide.tips?.map((tip) => (
+        <details className="guide-tip" key={tip.title}>
+          <summary>{tip.title}</summary>
+          <p>{tip.body}</p>
+          {tip.link && (
+            <a className="guide-link" href={tip.link.url} target="_blank" rel="noreferrer noopener">
+              {tip.link.label}<ExternalLink size={14} strokeWidth={2} aria-hidden="true" />
+            </a>
+          )}
+        </details>
+      ))}
       <div className="guide-cautions">
         {guide.cautions.map((caution) => (
           <p key={caution}><CircleAlert size={14} strokeWidth={2} aria-hidden="true" /> {caution}</p>

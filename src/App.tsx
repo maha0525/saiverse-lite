@@ -20,7 +20,7 @@ import {
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
 import { importChatGptFile, importClaudeFile } from "./importers";
 import { LEGAL_VERSION } from "./legal";
-import { completeOnboarding, loadOnboarding } from "./onboarding";
+import { completeOnboarding, loadOnboarding, resetOnboarding } from "./onboarding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
@@ -297,7 +297,7 @@ export default function App() {
         return `${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`;
       })}
     />;
-    return <SettingsView providers={providers} settings={settings} canInstall={installPrompt !== null} onRestartOnboarding={() => setWizard("full")} onInstall={async () => { if (!installPrompt) return; await installPrompt.prompt(); const choice = await installPrompt.userChoice; if (choice.outcome === "accepted") setInstallPrompt(null); }} onSaveProvider={async (provider) => { await repository.putProvider(provider); setProviders(await repository.listProviders()); }} onDeleteProvider={async (id) => {
+    return <SettingsView providers={providers} settings={settings} canInstall={installPrompt !== null} onRestartOnboarding={() => { resetOnboarding(); setWizard("full"); }} onInstall={async () => { if (!installPrompt) return; await installPrompt.prompt(); const choice = await installPrompt.userChoice; if (choice.outcome === "accepted") setInstallPrompt(null); }} onSaveProvider={async (provider) => { await repository.putProvider(provider); setProviders(await repository.listProviders()); }} onDeleteProvider={async (id) => {
       const users = personas.filter((persona) => persona.providerId === id);
       if (users.length) { setNotice(`${users.map((persona) => persona.name).join("、")}が使用中のため削除できません。`); return; }
       await repository.deleteProvider(id); setProviders(await repository.listProviders());

@@ -1,5 +1,11 @@
+import { ExternalLink } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { newId, type AppSettings, type ProviderConfig, type ProviderKind } from "../domain";
+import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
+import { THIRD_PARTY_LICENSES } from "../thirdPartyLicenses";
+import { LegalModal } from "./LegalModal";
+
+const REPO_URL = "https://github.com/maha0525/saiverse-lite";
 
 interface SettingsViewProps {
   providers: ProviderConfig[];
@@ -9,6 +15,7 @@ interface SettingsViewProps {
   onSaveProvider(provider: ProviderConfig): Promise<void>;
   onDeleteProvider(id: string): Promise<void>;
   onSaveSettings(settings: AppSettings): Promise<void>;
+  onRestartOnboarding(): void;
 }
 
 function newProvider(kind: ProviderKind): ProviderConfig {
@@ -32,6 +39,7 @@ function newProvider(kind: ProviderKind): ProviderConfig {
 }
 
 export function SettingsView(props: SettingsViewProps) {
+  const [modal, setModal] = useState<"privacy" | "terms" | "licenses" | null>(null);
   const [selectedId, setSelectedId] = useState(props.providers[0]?.id ?? "");
   const selected = props.providers.find((provider) => provider.id === selectedId);
   const [draft, setDraft] = useState<ProviderConfig>(() => selected ?? newProvider("openai"));
@@ -76,7 +84,22 @@ export function SettingsView(props: SettingsViewProps) {
           <p className="field-help">要約は固定されたシステムプロンプトの後、直近履歴の前に注入されます。ペルソナのツール定義は会話中に増減しません。</p>
           <button className="button" type="submit">アプリ設定を保存</button>
         </form>
+        <div className="panel form-panel about-panel">
+          <div className="form-heading"><h2>このアプリについて</h2><span className="local-chip">AGPL v3</span></div>
+          <p className="field-help">SAIVerse Lite v{__APP_VERSION__} (ビルド <a href={`${REPO_URL}/tree/${__BUILD_COMMIT__}`} target="_blank" rel="noreferrer noopener">{__BUILD_COMMIT__}</a>)。本アプリは自由ソフトウェアであり、GNU Affero General Public License v3.0 の下で「現状のまま」無保証で提供されます。動作中のこの版に対応するソースコードは下のリンクから入手できます。</p>
+          <div className="about-links">
+            <a className="text-button" href={REPO_URL} target="_blank" rel="noreferrer noopener">ソースコード (GitHub) <ExternalLink size={13} aria-hidden="true" /></a>
+            <a className="text-button" href={`${REPO_URL}/blob/main/LICENSE`} target="_blank" rel="noreferrer noopener">ライセンス全文 (AGPL v3) <ExternalLink size={13} aria-hidden="true" /></a>
+            <button type="button" className="text-button" onClick={() => setModal("licenses")}>サードパーティライセンス</button>
+            <button type="button" className="text-button" onClick={() => setModal("privacy")}>プライバシーポリシー</button>
+            <button type="button" className="text-button" onClick={() => setModal("terms")}>利用規約・免責事項</button>
+            <button type="button" className="text-button" onClick={props.onRestartOnboarding}>はじめかたガイドをもう一度</button>
+          </div>
+        </div>
       </div>
+      {modal === "privacy" && <LegalModal document={PRIVACY_POLICY} onClose={() => setModal(null)} />}
+      {modal === "terms" && <LegalModal document={TERMS_OF_USE} onClose={() => setModal(null)} />}
+      {modal === "licenses" && <LegalModal document={THIRD_PARTY_LICENSES} onClose={() => setModal(null)} />}
     </section>
   );
 }

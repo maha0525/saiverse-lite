@@ -266,6 +266,39 @@ export async function extractClaudeMemories(file: File): Promise<ClaudeMemoryTex
   return texts;
 }
 
+export interface OfficialImportResult {
+  threads: number;
+  messages: number;
+  memories: number;
+}
+
+// App と初回ウィザードの両方から使う、ファイル一枚ぶんの取り込み処理。
+export async function importChatGptFile(repository: LiteRepository, persona: Persona, file: File): Promise<OfficialImportResult> {
+  const conversations = await new ChatGptExportAdapter().parse(file);
+  const result = await saveImportedConversations(repository, persona, conversations);
+  return { ...result, memories: 0 };
+}
+
+export async function importClaudeFile(repository: LiteRepository, persona: Persona, file: File): Promise<OfficialImportResult> {
+  const conversations = await new ClaudeExportAdapter().parse(file);
+  const result = await saveImportedConversations(repository, persona, conversations);
+  const memoryTexts = await extractClaudeMemories(file);
+  const now = Date.now();
+  for (const memory of memoryTexts) {
+    await repository.putMemory({
+      id: memory.id,
+      personaId: persona.id,
+      threadId: null,
+      kind: "note",
+      content: memory.text,
+      sourceMessageIds: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  return { ...result, memories: memoryTexts.length };
+}
+
 export async function saveImportedConversations(
   repository: LiteRepository,
   persona: Persona,

@@ -1,5 +1,19 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { newId, type Persona, type ProviderConfig, type ToolId } from "../domain";
+import { loadDraft, saveDraft } from "../onboarding";
+
+const NEW_FORM_DRAFT_KEY = "personaForm.new";
+
+function restoreNewDraft(base: Persona): Persona {
+  try {
+    const raw = loadDraft(NEW_FORM_DRAFT_KEY);
+    if (!raw) return base;
+    const saved = JSON.parse(raw) as Partial<Pick<Persona, "name" | "description" | "systemPrompt">>;
+    return { ...base, name: saved.name ?? "", description: saved.description ?? "", systemPrompt: saved.systemPrompt ?? "" };
+  } catch {
+    return base;
+  }
+}
 
 interface PersonaViewProps {
   personas: Persona[];
@@ -34,11 +48,22 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
     if (selected && !isNew) setDraft(structuredClone(selected));
   }, [selected, isNew]);
 
+  // 書きかけの新規フォームを端末へ自動保存 (事故で閉じても消えない)
+  useEffect(() => {
+    if (!isNew) return;
+    const timer = setTimeout(() => {
+      const hasContent = draft.name.trim() || draft.description.trim() || draft.systemPrompt.trim();
+      saveDraft(NEW_FORM_DRAFT_KEY, hasContent ? JSON.stringify({ name: draft.name, description: draft.description, systemPrompt: draft.systemPrompt }) : "");
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [isNew, draft.name, draft.description, draft.systemPrompt]);
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!draft.name.trim() || !draft.systemPrompt.trim()) return;
     const saved = { ...draft, name: draft.name.trim(), updatedAt: Date.now() };
     await onSave(saved);
+    if (isNew) saveDraft(NEW_FORM_DRAFT_KEY, "");
     setIsNew(false);
     onSelect(saved.id);
   };
@@ -53,7 +78,7 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
   };
   return (
     <section className="view content-view" aria-labelledby="persona-title">
-      <header className="view-header"><div><span className="eyebrow">PERSONA</span><h1 id="persona-title">パートナー</h1><p>人格・話し方・使うモデルを、ひとりずつ固定します。</p></div><button className="button" onClick={() => { setDraft(blankPersona(providers[0])); setIsNew(true); }}>新しく迎える</button></header>
+      <header className="view-header"><div><span className="eyebrow">PERSONA</span><h1 id="persona-title">パートナー</h1><p>人格・話し方・使うモデルを、ひとりずつ固定します。</p></div><button className="button" onClick={() => { setDraft(restoreNewDraft(blankPersona(providers[0]))); setIsNew(true); }}>新しく迎える</button></header>
       <div className="split-layout">
         <aside className="card-list" aria-label="ペルソナ一覧">
           {personas.map((persona) => (

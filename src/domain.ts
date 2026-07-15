@@ -75,6 +75,9 @@ export interface AppSettings {
   summaryEveryMessages: number;
   recentContextMessages: number;
   storagePersisted: boolean | null;
+  /** 同意済みの法務文書バージョン (legal.ts の LEGAL_VERSION)。未同意は undefined。加算的な任意フィールド (FORMATS.md §6)。 */
+  consentVersion?: string;
+  consentAt?: number;
 }
 
 export interface RepositorySnapshot {

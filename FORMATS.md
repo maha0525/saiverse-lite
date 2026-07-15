@@ -174,6 +174,12 @@ overwrite instead of duplicating.
 Imported message ids are deterministic for both sources
 (`message_import_<source>_<sourceId>`), making conversation re-imports idempotent.
 
+## 5.5 Settings additive fields
+
+`AppSettings` gained optional `consentVersion` / `consentAt` (2026-07-16, legal consent
+tracking). These are additive optional fields under the rules below; the backup format
+name is unchanged. Restoring an older backup simply re-triggers the consent screen.
+
 ## 6. Versioning rules
 
 - Readers reject unknown `format` values; they do not silently coerce them.

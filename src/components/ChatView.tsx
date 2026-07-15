@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatMessage, ConversationThread, Persona } from "../domain";
+import { loadDraft, saveDraft } from "../onboarding";
 
 interface ChatViewProps {
   persona: Persona;
@@ -58,11 +59,22 @@ export function ChatView(props: ChatViewProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [props.messages, props.streamingText]);
 
+  // 打ちかけの言葉をスレッドごとに端末へ自動保存 (事故で閉じても消えない)
+  useEffect(() => {
+    setDraft(props.activeThreadId ? loadDraft(`composer.${props.activeThreadId}`) : "");
+  }, [props.activeThreadId]);
+  useEffect(() => {
+    if (!props.activeThreadId) return;
+    const timer = setTimeout(() => saveDraft(`composer.${props.activeThreadId}`, draft), 400);
+    return () => clearTimeout(timer);
+  }, [draft, props.activeThreadId]);
+
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const text = draft.trim();
     if (!text || props.sending || !props.activeThreadId) return;
     setDraft("");
+    saveDraft(`composer.${props.activeThreadId}`, "");
     await props.onSend(text);
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {

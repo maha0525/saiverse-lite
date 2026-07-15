@@ -18,7 +18,10 @@ import {
   type ProviderConfig,
 } from "./domain";
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
-import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, saveImportedConversations } from "./importers";
+import { importChatGptFile, importClaudeFile } from "./importers";
+import { LEGAL_VERSION } from "./legal";
+import { completeOnboarding, loadOnboarding } from "./onboarding";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
 
@@ -62,6 +65,7 @@ export default function App() {
   const [dataBusy, setDataBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [wizard, setWizard] = useState<"full" | "consent" | null>(null);
 
   const selectedPersona = personas.find((persona) => persona.id === selectedPersonaId) ?? personas[0];
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
@@ -109,6 +113,26 @@ export default function App() {
         const current = await repository.getSettings();
         if (current.storagePersisted !== persisted) await repository.putSettings({ ...current, storagePersisted: persisted });
         await refreshBase();
+        // 初回導線の起動判定。会話実績のある既存利用者には full ウィザードを出さない。
+        const onboarding = loadOnboarding();
+        const consentOk = current.consentVersion === LEGAL_VERSION;
+        if (!onboarding.completed) {
+          let hasHistory = false;
+          for (const persona of await repository.listPersonas()) {
+            for (const thread of await repository.listThreads(persona.id)) {
+              if ((await repository.listMessages(thread.id)).length > 0) { hasHistory = true; break; }
+            }
+            if (hasHistory) break;
+          }
+          if (hasHistory) {
+            completeOnboarding(); // 既存利用者は次回以降この走査をしない
+            if (!consentOk) setWizard("consent");
+          } else {
+            setWizard("full");
+          }
+        } else if (!consentOk) {
+          setWizard("consent");
+        }
       } catch (error) {
         console.error("[SAIVerse Lite] initialization failed", error);
         setNotice(`初期化に失敗しました: ${errorMessage(error)}`);
@@ -265,30 +289,15 @@ export default function App() {
       onExportBackup={() => runDataAction(async () => { downloadJson("saiverse-lite-backup.json", exportFullBackup(await repository.exportSnapshot())); return "フルバックアップを書き出しました。"; })}
       onImportBackup={(file) => runDataAction(async () => { if (!window.confirm("現在の端末内データをバックアップ内容で置き換えますか？")) return "復元をキャンセルしました。"; await repository.replaceSnapshot(parseFullBackup(JSON.parse(await file.text()))); await refreshBase(); return "バックアップを復元しました。APIキーは再入力してください。"; })}
       onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); for (const thread of imported.threads) await repository.putThread(thread); for (const message of imported.messages) await repository.putMessage(message); for (const memory of imported.memories) await repository.putMemory(memory); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
-      onImportChatGpt={(file) => runDataAction(async () => { const conversations = await new ChatGptExportAdapter().parse(file); const result = await saveImportedConversations(repository, selectedPersona, conversations); await loadPersonaData(selectedPersona.id); return `${result.threads}会話、${result.messages}発言を取り込みました。`; })}
+      onImportChatGpt={(file) => runDataAction(async () => { const result = await importChatGptFile(repository, selectedPersona, file); await loadPersonaData(selectedPersona.id); return `${result.threads}会話、${result.messages}発言を取り込みました。`; })}
       onImportClaude={(file) => runDataAction(async () => {
-        const conversations = await new ClaudeExportAdapter().parse(file);
-        const result = await saveImportedConversations(repository, selectedPersona, conversations);
-        const memoryTexts = await extractClaudeMemories(file);
-        const now = Date.now();
-        for (const memory of memoryTexts) {
-          await repository.putMemory({
-            id: memory.id,
-            personaId: selectedPersona.id,
-            threadId: null,
-            kind: "note",
-            content: memory.text,
-            sourceMessageIds: [],
-            createdAt: now,
-            updatedAt: now,
-          });
-        }
+        const result = await importClaudeFile(repository, selectedPersona, file);
         await loadPersonaData(selectedPersona.id);
-        const memoryNote = memoryTexts.length ? `、Claude の記憶 ${memoryTexts.length} 件` : "";
+        const memoryNote = result.memories ? `、Claude の記憶 ${result.memories} 件` : "";
         return `${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`;
       })}
     />;
-    return <SettingsView providers={providers} settings={settings} canInstall={installPrompt !== null} onInstall={async () => { if (!installPrompt) return; await installPrompt.prompt(); const choice = await installPrompt.userChoice; if (choice.outcome === "accepted") setInstallPrompt(null); }} onSaveProvider={async (provider) => { await repository.putProvider(provider); setProviders(await repository.listProviders()); }} onDeleteProvider={async (id) => {
+    return <SettingsView providers={providers} settings={settings} canInstall={installPrompt !== null} onRestartOnboarding={() => setWizard("full")} onInstall={async () => { if (!installPrompt) return; await installPrompt.prompt(); const choice = await installPrompt.userChoice; if (choice.outcome === "accepted") setInstallPrompt(null); }} onSaveProvider={async (provider) => { await repository.putProvider(provider); setProviders(await repository.listProviders()); }} onDeleteProvider={async (id) => {
       const users = personas.filter((persona) => persona.providerId === id);
       if (users.length) { setNotice(`${users.map((persona) => persona.name).join("、")}が使用中のため削除できません。`); return; }
       await repository.deleteProvider(id); setProviders(await repository.listProviders());
@@ -296,6 +305,25 @@ export default function App() {
   })();
 
   if (loading) return <main className="loading-screen"><div className="brand-mark"><img src={logoUrl} alt="" /></div><h1>SAIVerse Lite</h1><p>部屋を整えています…</p></main>;
+
+  if (wizard) {
+    return <OnboardingWizard
+      repository={repository}
+      consentAlreadyGiven={settings.consentVersion === LEGAL_VERSION}
+      consentOnly={wizard === "consent"}
+      onConsent={async () => {
+        const current = await repository.getSettings();
+        const next = { ...current, consentVersion: LEGAL_VERSION, consentAt: Date.now() };
+        await repository.putSettings(next);
+        setSettings(next);
+      }}
+      onFinished={async (personaId) => {
+        setWizard(null);
+        await refreshBase(personaId ?? undefined);
+        setView("chat");
+      }}
+    />;
+  }
   return (
     <div className="app-shell">
       <Nav active={view} onChange={setView} online={online} />

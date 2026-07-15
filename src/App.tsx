@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import logoUrl from "./assets/logo.png";
 import { ChatService } from "./chatService";
 import { ChatView } from "./components/ChatView";
 import { DataView } from "./components/DataView";
@@ -274,7 +275,7 @@ export default function App() {
     }} onSaveSettings={async (value) => { await repository.putSettings(value); setSettings(value); }} />;
   })();
 
-  if (loading) return <main className="loading-screen"><div className="brand-mark">九</div><h1>SAIVerse Lite</h1><p>部屋を整えています…</p></main>;
+  if (loading) return <main className="loading-screen"><div className="brand-mark"><img src={logoUrl} alt="" /></div><h1>SAIVerse Lite</h1><p>部屋を整えています…</p></main>;
   return (
     <div className="app-shell">
       <Nav active={view} onChange={setView} online={online} />

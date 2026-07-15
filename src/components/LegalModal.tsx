@@ -2,13 +2,13 @@ import { X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { LegalDocument } from "../legal";
 
-// 本文中の URL をクリック可能にする
+// 本文中の URL とメールアドレスをクリック可能にする
 function linkify(body: string): ReactNode[] {
-  return body.split(/(https?:\/\/[^\s、。()]+)/g).map((part, index) =>
-    /^https?:\/\//.test(part)
-      ? <a key={index} href={part} target="_blank" rel="noreferrer noopener">{part}</a>
-      : part,
-  );
+  return body.split(/(https?:\/\/[^\s、。()]+|[\w.+-]+@[\w-]+\.[\w.-]+)/g).map((part, index) => {
+    if (/^https?:\/\//.test(part)) return <a key={index} href={part} target="_blank" rel="noreferrer noopener">{part}</a>;
+    if (/^[\w.+-]+@[\w-]+\.[\w.-]+$/.test(part)) return <a key={index} href={`mailto:${part}`}>{part}</a>;
+    return part;
+  });
 }
 
 export function LegalModal({ document, onClose }: { document: LegalDocument; onClose(): void }) {

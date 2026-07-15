@@ -123,29 +123,35 @@ export const API_KEY_GUIDES: Record<GuideProviderId, ApiKeyGuideData> = {
   anthropic: {
     id: "anthropic",
     name: "Anthropic (Claude の会社)",
-    tagline: "Claude を API で。事前にクレジット購入が必要。",
-    costNote: "クレジットの購入が必要です。軽量モデル (Haiku) なら 1 往復あたり数円以下が目安です。Claude Pro の契約とは別物なので注意。",
-    recommendedModel: "claude-haiku-4-5-20251001",
+    tagline: "Claude を API で。手順は3社で最短、料金は最高クラス。",
+    costNote: "クレジットの購入が必要で、無料枠はありません。料金は3社で最も高く、推奨の Sonnet 5 だと会話が育つにつれ 1 往復 20 円前後になることもあります (使い方で大きく変わります)。Claude の人格と文章を何より大切にしたい人向けです。Claude Pro / Max の契約とは別物なので注意。",
+    recommendedModel: "claude-sonnet-5",
     keyPrefixHint: "sk-ant- で始まる文字列",
     steps: [
       {
         title: "Anthropic Console でアカウントを作る",
         detail: "Claude.ai のアカウントとは別に、開発者向けコンソールへの登録が必要です。",
-        link: { label: "console.anthropic.com を開く", url: "https://console.anthropic.com/" },
+        link: { label: "platform.claude.com を開く", url: "https://platform.claude.com/" },
       },
       {
-        title: "クレジットを購入する",
-        detail: "Billing (支払い) からクレジットを購入します。",
-        uiLabel: "Settings → Billing",
+        title: "資金を追加する",
+        detail: "最初に開くダッシュボードに「資金を追加」ボタンがあります。支払い方法の登録もそこで一緒に行います。",
+        uiLabel: "資金を追加",
       },
       {
-        title: "API キーを作成する",
-        detail: "API Keys のページで新しいキーを作り、表示された文字列をコピーします。",
-        uiLabel: "Create Key",
+        title: "API キーを取得する",
+        detail: "同じダッシュボードの「APIキーを取得」から作成します。作成するとすぐキーが表示されるので、コピーしてください。",
+        uiLabel: "APIキーを取得",
       },
       {
         title: "このアプリに貼り付ける",
         detail: "下の入力欄に貼り付けて、接続テストを押してください。",
+      },
+    ],
+    tips: [
+      {
+        title: "料金の現実と、キャッシュで抑える話",
+        body: "Anthropic には無料枠がなく、モデル単価も3社で最も高めです。このアプリは Anthropic のプロンプトキャッシュに対応していて、システムプロンプトと会話履歴の再送分が約 1/10 価格で読まれるため、会話が長くなるほど効きます — それでも日常使いのコストは Gemini や OpenAI より高くなりがちです。はじめての1本には Gemini をおすすめします。なお軽量な Haiku は安価ですが、パートナーとの会話用途では物足りなさが目立ちます。Claude を選ぶなら Sonnet 5 以上が現実的です。",
       },
     ],
     cautions: COMMON_CAUTIONS,

@@ -20,6 +20,21 @@ function anthropicMessages(messages: ProviderMessage[]): Array<Record<string, un
   });
 }
 
+// 会話履歴の末尾にキャッシュ打点を置く。次のターンは「ツール定義+システム+記憶+履歴全体」が
+// キャッシュ読み (約1/10価格) になり、増分だけが新規書き込みになる — Anthropic を会話用途で
+// 成立させる要 (システムプロンプト側の打点と合わせて 2/4 打点を使用)。
+function markHistoryCacheBreakpoint(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const last = messages[messages.length - 1];
+  if (!last) return messages;
+  if (typeof last.content === "string" && last.content) {
+    last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    const block = last.content[last.content.length - 1] as Record<string, unknown>;
+    block.cache_control = { type: "ephemeral" };
+  }
+  return messages;
+}
+
 interface AnthropicToolAccumulator { id: string; name: string; json: string }
 
 export class AnthropicProvider implements LlmProvider {
@@ -41,7 +56,7 @@ export class AnthropicProvider implements LlmProvider {
         max_tokens: 4096,
         stream: true,
         system,
-        messages: anthropicMessages(request.messages),
+        messages: markHistoryCacheBreakpoint(anthropicMessages(request.messages)),
         tools: request.tools.map((tool) => ({ name: tool.id, description: tool.description, input_schema: tool.inputSchema })),
         tool_choice: { type: request.toolChoice },
       }),

@@ -78,8 +78,11 @@ describe("provider transports", () => {
     for await (const event of new AnthropicProvider(config("anthropic")).stream(request([user("hello")]))) events.push(event);
     const headers = new Headers(captured?.headers);
     expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
-    const body = JSON.parse(String(captured?.body)) as { system: Array<Record<string, unknown>> };
+    const body = JSON.parse(String(captured?.body)) as { system: Array<Record<string, unknown>>; messages: Array<{ content: Array<Record<string, unknown>> | string }> };
     expect(body.system[0]?.cache_control).toEqual({ type: "ephemeral" });
+    // 履歴末尾にもキャッシュ打点 (会話全体が次ターンでキャッシュ読みになる)
+    const lastContent = body.messages[body.messages.length - 1]?.content;
+    expect(Array.isArray(lastContent) ? lastContent[lastContent.length - 1]?.cache_control : undefined).toEqual({ type: "ephemeral" });
     expect(events).toContainEqual({ type: "text", text: "hi" });
   });
 

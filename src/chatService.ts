@@ -32,12 +32,16 @@ function toolCallsFromMetadata(metadata: Record<string, unknown>): ToolCall[] {
 }
 
 function toProviderMessage(message: ChatMessage): ProviderMessage {
+  const providerState = message.metadata.lite_provider_state;
   return {
     role: message.role,
     content: message.content,
     toolCallId: message.toolCallId,
     toolName: message.toolName,
     toolCalls: toolCallsFromMetadata(message.metadata),
+    ...(typeof providerState === "object" && providerState !== null && !Array.isArray(providerState)
+      ? { providerState: providerState as Record<string, unknown> }
+      : {}),
   };
 }
 
@@ -120,6 +124,7 @@ export class ChatService {
       let inputTokens = 0;
       let outputTokens = 0;
       let cachedTokens = 0;
+      let providerState: Record<string, unknown> | null = null;
       const recent = messages.slice(-settings.recentContextMessages).map(toProviderMessage);
       for await (const event of provider.stream({
         model: persona.model || config.defaultModel,
@@ -135,7 +140,9 @@ export class ChatService {
           callbacks.onDelta?.(event.text);
         } else if (event.type === "tool-call") {
           calls.push(event.call);
-        } else {
+        } else if (event.type === "provider-state") {
+          providerState = event.state;
+        } else if (event.type === "usage") {
           inputTokens = event.inputTokens;
           outputTokens = event.outputTokens;
           cachedTokens = event.cachedTokens;
@@ -155,6 +162,7 @@ export class ChatService {
         metadata: {
           usage: usageMetadata(inputTokens, outputTokens, cachedTokens),
           ...(calls.length ? { tool_calls: calls } : {}),
+          ...(providerState ? { lite_provider_state: providerState } : {}),
         },
       };
       await this.repository.putMessage(assistant);

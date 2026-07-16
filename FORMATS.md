@@ -78,7 +78,14 @@ Lite adds namespaced metadata without replacing existing metadata:
 - `edited_at`
 - `tool_call_id`
 - `tool_name`
+- `lite_provider_state` (optional opaque state required to continue a stateless
+  provider response, currently OpenAI Responses encrypted reasoning/output items)
 - tags `conversation` and `saiverse_lite`
+
+`lite_provider_state` is transport continuity data, not persona memory or hidden
+reasoning text. OpenAI Responses is called with `store: false`; Lite therefore keeps
+the returned opaque output items on-device and replays them when a function call
+continues. Importers must preserve this metadata field but should not interpret it.
 
 Long-term memories are exported as messages in the synthetic thread
 `<persona-id>:lite-memory`. Their metadata contains:

@@ -35,7 +35,36 @@ function markHistoryCacheBreakpoint(messages: Array<Record<string, unknown>>, ca
   return messages;
 }
 
-interface AnthropicToolAccumulator { id: string; name: string; json: string }
+interface AnthropicToolAccumulator {
+  id: string;
+  name: string;
+  json: string;
+  initialInput: Record<string, unknown> | null;
+}
+
+interface AnthropicUsageAccumulator {
+  rawInputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  seen: boolean;
+}
+
+function recordUsage(target: AnthropicUsageAccumulator, value: unknown): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return;
+  const usage = value as Record<string, unknown>;
+  if ("input_tokens" in usage) target.rawInputTokens = Number(usage.input_tokens ?? 0);
+  if ("output_tokens" in usage) target.outputTokens = Number(usage.output_tokens ?? 0);
+  if ("cache_read_input_tokens" in usage) target.cacheReadTokens = Number(usage.cache_read_input_tokens ?? 0);
+  if ("cache_creation_input_tokens" in usage) target.cacheCreationTokens = Number(usage.cache_creation_input_tokens ?? 0);
+  target.seen = true;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
 
 export class AnthropicProvider implements LlmProvider {
   constructor(readonly config: ProviderConfig) {}
@@ -59,26 +88,48 @@ export class AnthropicProvider implements LlmProvider {
     };
     if (ttl === "1h") headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11";
     const baseMessages = anthropicMessages(request.messages);
+    const body: Record<string, unknown> = {
+      model: request.model,
+      max_tokens: 4096,
+      stream: true,
+      system,
+      messages: cacheControl ? markHistoryCacheBreakpoint(baseMessages, cacheControl) : baseMessages,
+    };
+    if (request.tools.length > 0) {
+      body.tools = request.tools.map((tool) => ({ name: tool.id, description: tool.description, input_schema: tool.inputSchema }));
+      body.tool_choice = { type: request.toolChoice };
+    }
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: request.model,
-        max_tokens: 4096,
-        stream: true,
-        system,
-        messages: cacheControl ? markHistoryCacheBreakpoint(baseMessages, cacheControl) : baseMessages,
-        tools: request.tools.map((tool) => ({ name: tool.id, description: tool.description, input_schema: tool.inputSchema })),
-        tool_choice: { type: request.toolChoice },
-      }),
+      body: JSON.stringify(body),
       signal: request.signal ?? null,
     });
     await assertOk(response, this.config.label);
     const toolBlocks = new Map<number, AnthropicToolAccumulator>();
+    const usage: AnthropicUsageAccumulator = {
+      rawInputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      seen: false,
+    };
     for await (const event of readSse(response)) {
       const parsed = safeJson(event.data);
       if (!parsed) continue;
       const eventType = typeof parsed.type === "string" ? parsed.type : event.event;
+      if (eventType === "error") {
+        const error = objectValue(parsed.error);
+        const errorType = typeof error?.type === "string" ? error.type : "stream_error";
+        const message = typeof error?.message === "string" ? error.message : "不明なストリーミングエラー";
+        console.error(`[SAIVerse Lite][${this.config.label}] SSE error`, { type: errorType, message });
+        throw new Error(`${this.config.label} API stream error (${errorType}): ${message}`);
+      }
+      if (eventType === "message_start") {
+        recordUsage(usage, objectValue(parsed.message)?.usage);
+      } else {
+        recordUsage(usage, parsed.usage);
+      }
       if (eventType === "content_block_start") {
         const block = parsed.content_block as Record<string, unknown> | undefined;
         if (block?.type === "tool_use") {
@@ -86,6 +137,7 @@ export class AnthropicProvider implements LlmProvider {
             id: String(block.id ?? `toolu_${crypto.randomUUID()}`),
             name: String(block.name ?? ""),
             json: "",
+            initialInput: objectValue(block.input),
           });
         }
       }
@@ -100,20 +152,31 @@ export class AnthropicProvider implements LlmProvider {
       if (eventType === "content_block_stop") {
         const current = toolBlocks.get(Number(parsed.index));
         if (current) {
-          const call: ToolCall = { id: current.id, name: current.name as ToolId, arguments: safeJson(current.json) ?? {} };
+          const call: ToolCall = {
+            id: current.id,
+            name: current.name as ToolId,
+            arguments: safeJson(current.json) ?? current.initialInput ?? {},
+          };
           yield { type: "tool-call", call };
           toolBlocks.delete(Number(parsed.index));
         }
       }
-      const usage = parsed.usage as Record<string, unknown> | undefined;
-      if (usage) {
-        yield {
-          type: "usage",
-          inputTokens: Number(usage.input_tokens ?? 0),
-          outputTokens: Number(usage.output_tokens ?? 0),
-          cachedTokens: Number(usage.cache_read_input_tokens ?? 0),
-        };
-      }
+    }
+    if (usage.seen) {
+      const inputTokens = usage.rawInputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
+      console.debug(`[SAIVerse Lite][${this.config.label}] Usage`, {
+        rawInputTokens: usage.rawInputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+        inputTokens,
+        outputTokens: usage.outputTokens,
+      });
+      yield {
+        type: "usage",
+        inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedTokens: usage.cacheReadTokens,
+      };
     }
   }
 

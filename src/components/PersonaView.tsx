@@ -78,13 +78,13 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
   };
   return (
     <section className="view content-view" aria-labelledby="persona-title">
-      <header className="view-header"><div><span className="eyebrow">PERSONA</span><h1 id="persona-title">パートナー</h1><p>人格・話し方・使うモデルを、ひとりずつ固定します。</p></div><button className="button" onClick={() => { setDraft(restoreNewDraft(blankPersona(providers[0]))); setIsNew(true); }}>新しく迎える</button></header>
+      <header className="view-header persona-view-header"><div><span className="eyebrow">PERSONA</span><h1 id="persona-title">パートナー</h1><p>人格・話し方・使うモデルを、ひとりずつ固定します。</p></div><button className="button" onClick={() => { setDraft(restoreNewDraft(blankPersona(providers[0]))); setIsNew(true); }}>新しく迎える</button></header>
       <div className="split-layout">
         <aside className="card-list" aria-label="ペルソナ一覧">
           {personas.map((persona) => (
             <button key={persona.id} className={persona.id === selectedId && !isNew ? "persona-card selected" : "persona-card"} onClick={() => { setIsNew(false); onSelect(persona.id); }}>
               <span className="card-avatar">{persona.avatarDataUrl ? <img src={persona.avatarDataUrl} alt="" /> : persona.name.slice(0, 1)}</span>
-              <span><strong>{persona.name}</strong><small>{persona.description || "説明はまだありません"}</small></span>
+              <span className="persona-card-copy"><strong>{persona.name}</strong><small>{persona.description || "説明はまだありません"}</small></span>
             </button>
           ))}
         </aside>

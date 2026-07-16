@@ -43,6 +43,14 @@ system prompt と tool definitions はペルソナに保存し、ターンごと
 短い prefix、cache create の非成功応答、create 例外ではログを残して inline 通常呼び出しへ
 silent fallback します。実 API での token 判定・課金効果は未検証です。
 
+### OpenAI Responses API
+
+公式 OpenAI は `/v1/responses` を使用し、OpenAI 互換 URL は互換性維持のため
+`/v1/chat/completions` を使用します。Responses API は `store: false` とし、OpenAI
+側の会話保存には依存しません。推論モデルの function calling を継続するため、レスポンスの
+opaque output items（暗号化 reasoning item を含む）を `lite_provider_state` として端末内に
+保存し、次のツールラウンドへそのまま返します。実 API キーでの通信は未検証です。
+
 ### ツール
 
 ツールはレジストリ方式で、ペルソナの `toolIds` に登録されたものだけを各社の native
@@ -60,6 +68,7 @@ hidden message、添付・tool result の扱いを確認してから実装して
 ## 次に実データで確認する項目
 
 1. 各プロバイダの実キー・実モデルで、ストリーム終端と native tool-call payload を確認する。
+   OpenAI は Responses API の reasoning item → function call → function output の連鎖も確認する。
 2. Gemini cache が作成される長い固定 prefix と、作成不能な短い prefix の双方をログで確認する。
 3. ChatGPT の実 ZIP、大容量履歴、添付・tool result を含むデータで import 結果を照合する。
 4. Claude 公式エクスポートの匿名化サンプルから adapter と fixture を実装する。

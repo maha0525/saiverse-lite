@@ -129,20 +129,23 @@ textarea { resize: vertical; line-height: 1.6; }
 .empty-state h2 { margin: 10px 0 4px; color: var(--text); font-weight: 600; }
 .compact-empty { min-height: 220px; grid-column: 1 / -1; }
 .split-layout { display: grid; grid-template-columns: minmax(210px, .6fr) minmax(0, 1.4fr); gap: 22px; align-items: start; }
+.split-layout > * { min-width: 0; }
 .card-list { display: grid; gap: 9px; }
-.persona-card { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); text-align: left; }
+.persona-card { display: flex; align-items: center; gap: 12px; min-width: 0; width: 100%; padding: 12px; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); text-align: left; }
 .persona-card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .card-avatar { width: 42px; height: 42px; border-radius: 10px; }
+.persona-card-copy { min-width: 0; flex: 1; }
 .persona-card strong, .persona-card small { display: block; }
-.persona-card small { margin-top: 4px; color: var(--muted); white-space: nowrap; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+.persona-card strong { overflow-wrap: anywhere; line-height: 1.4; }
+.persona-card small { display: -webkit-box; margin-top: 4px; max-width: 100%; overflow: hidden; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .form-panel { padding: clamp(18px, 4vw, 30px); display: grid; gap: 18px; }
 .form-heading { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
-.form-heading h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.form-heading h2 { min-width: 0; margin: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 .field { display: grid; gap: 7px; }
 .field > span, .tool-field legend { color: var(--muted); font-size: 12px; font-weight: 700; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .field-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
-.avatar-editor { display: flex; align-items: center; gap: 12px; }
+.avatar-editor { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .file-button { display: inline-flex; align-items: center; justify-content: center; position: relative; overflow: hidden; cursor: pointer; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .tool-field { display: flex; gap: 18px; border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
@@ -266,7 +269,10 @@ textarea { resize: vertical; line-height: 1.6; }
   .message-avatar { width: 30px; height: 30px; }
   .composer-wrap { padding-inline: 10px; }
   .split-layout { grid-template-columns: 1fr; }
-  .card-list { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .persona-view-header { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .persona-view-header .button { justify-self: start; }
+  .card-list { grid-template-columns: minmax(0, 1fr); }
+  .persona-card { padding: 14px; }
   .field-grid, .memory-grid { grid-template-columns: 1fr; }
   .memory-compose { display: grid; }
   .form-panel { border-radius: 16px; }

@@ -45,19 +45,23 @@ pnpm build
 境界をまたぐ形式の正典は [FORMATS.md](FORMATS.md)、設計判断と残課題は
 [HANDOFF.md](HANDOFF.md) にあります。
 
+Gemma 4 E2B / E4B を PWA 上でオンデバイス実行する調査結果と実装案は、
+[docs/gemma4_on_device.md](docs/gemma4_on_device.md) にあります（実装・実機検証は未着手）。
+
 ## 検証済み
 
-2026-07-15 に次をローカル実行しました。
+2026-07-16 に次をローカル実行しました。
 
 - TypeScript strict 型検査: 成功
-- Vitest: 5 ファイル、11 テスト成功
+- Vitest: 6 ファイル、20 テスト成功
 - Vite production build: 成功
 - production preview の HTTP smoke test: HTML、manifest、service worker がすべて 200
 - メモリ実装と fake IndexedDB の共通ストレージ契約
 - Lite バックアップ、および `saiverse_saimemory_v1` のラウンドトリップ
 - ChatGPT active branch / hidden message のパーサ規則
 - Mock 会話、自動要約、記憶想起ツール
-- 通信モックによる OpenAI tool-call、Anthropic 必須ヘッダと cache breakpoint、
+- 通信モックによる OpenAI Responses API の推論状態を含む tool-call 連鎖、
+  OpenAI 互換 Chat Completions、Anthropic 必須ヘッダと cache breakpoint、
   Gemini cache の作成・利用・削除
 
 ## 未検証
@@ -68,6 +72,33 @@ pnpm build
 - Claude 公式エクスポート（サンプル不在のため、推測実装をしていません）
 - SAIVerse 本体へのペルソナ、および会話・記憶ファイルの end-to-end インポート
 - モバイル実機でのインストール、オフライン再起動、永続ストレージ許可
+
+## Cloudflare Workers へのデプロイ
+
+本番Worker名は `saiverse-lite`、配信対象は Vite が生成する `dist/` です。
+`app.saiverse.net` のCustom DomainはCloudflare側の既存Worker設定を使用します。
+
+初回のみ、CloudflareアカウントをOAuth認証します。Windowsでは資格情報を
+Credential Managerへ暗号化保存するため、`--use-keyring` を指定してください。
+
+```powershell
+corepack pnpm exec wrangler login --use-keyring
+```
+
+アップロードせず設定・テスト・ビルドを検証する場合:
+
+```powershell
+corepack pnpm deploy:dry-run
+```
+
+テストとproduction buildが成功した場合だけ本番へデプロイします:
+
+```powershell
+corepack pnpm deploy
+```
+
+API tokenを使う場合も値をリポジトリへ保存しないでください。CIでは
+`CLOUDFLARE_ACCOUNT_ID` と `CLOUDFLARE_API_TOKEN` をsecretとして設定します。
 
 ## セキュリティ境界
 

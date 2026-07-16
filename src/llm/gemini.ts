@@ -27,7 +27,16 @@ function geminiMessages(messages: ProviderMessage[], memoryContext: string): Gem
 }
 
 function toolConfig(request: ProviderRequest): Record<string, unknown>[] {
-  return [{ functionDeclarations: request.tools.map((tool) => ({ name: tool.id, description: tool.description, parameters: tool.inputSchema })) }];
+  return [{
+    functionDeclarations: request.tools.map((tool) => ({
+      name: tool.id,
+      description: tool.description,
+      // Gemini's `parameters` field accepts only its restricted OpenAPI Schema.
+      // `parametersJsonSchema` is the full JSON Schema field and preserves
+      // constraints such as additionalProperties: false.
+      parametersJsonSchema: tool.inputSchema,
+    })),
+  }];
 }
 
 function approxTokens(systemPrompt: string, contents: GeminiContent[]): number {

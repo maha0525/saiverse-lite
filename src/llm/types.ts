@@ -19,6 +19,7 @@ export interface ProviderMessage {
   toolCallId: string | null;
   toolName: ToolId | null;
   toolCalls: ToolCall[];
+  providerState?: Record<string, unknown>;
 }
 
 export interface ProviderRequest {
@@ -34,6 +35,7 @@ export interface ProviderRequest {
 export type ProviderEvent =
   | { type: "text"; text: string }
   | { type: "tool-call"; call: ToolCall }
+  | { type: "provider-state"; state: Record<string, unknown> }
   | { type: "usage"; inputTokens: number; outputTokens: number; cachedTokens: number };
 
 export interface ImageGenerationResult {

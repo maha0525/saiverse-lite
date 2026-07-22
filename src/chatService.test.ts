@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService } from "./chatService";
-import { createDefaultPersona, newId, type ConversationThread, type MemoryEntry } from "./domain";
+import { ChatOperationError } from "./chatErrors";
+import { createDefaultPersona, newId, type ChatMessage, type ConversationThread, type MemoryEntry } from "./domain";
+import { retryDefaults } from "./llm/retry";
 import { MemoryRepository } from "./storage/memoryRepository";
+
+const originalRetry = { ...retryDefaults };
+beforeEach(() => { retryDefaults.initialDelayMs = 1; retryDefaults.maxDelayMs = 5; });
+afterEach(() => { Object.assign(retryDefaults, originalRetry); vi.unstubAllGlobals(); });
 
 describe("ChatService with mock provider", () => {
   it("streams, persists, and creates a deterministic automatic summary", async () => {
@@ -34,5 +40,140 @@ describe("ChatService with mock provider", () => {
     const result = await new ChatService(repository).send(persona, thread, "猫の名前を思い出して");
     expect(result.content).toContain("ミケ");
     expect((await repository.listMessages(thread.id)).some((message) => message.role === "tool" && message.toolName === "memory_recall")).toBe(true);
+  });
+
+  it("removes the failed user turn and restores the thread after a provider error", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const now = Date.now();
+    const provider = {
+      id: "provider_gemini",
+      kind: "gemini" as const,
+      label: "Google Gemini",
+      apiKey: "test-key",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      defaultModel: "gemini-test",
+      imageModel: "gemini-image-test",
+      geminiAutoCache: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await repository.putProvider(provider);
+    const persona = { ...createDefaultPersona(now), providerId: provider.id, model: provider.defaultModel };
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 503, message: "This model is currently experiencing high demand.", status: "UNAVAILABLE" } }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    )));
+
+    let caught: unknown;
+    try {
+      await new ChatService(repository).send(persona, thread, "あとでもう一度送る内容");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ChatOperationError);
+    expect((caught as ChatOperationError).rollbackSucceeded).toBe(true);
+    expect(await repository.listMessages(thread.id)).toEqual([]);
+    expect(await repository.getThread(thread.id)).toEqual(thread);
+  });
+
+  it("tells the user a retry is under way, then clears the notice once the stream arrives", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    await repository.putSettings({ id: "app", theme: "system", summaryEveryMessages: 50, recentContextMessages: 24, storagePersisted: null });
+    const now = Date.now();
+    const provider = {
+      id: "provider_gemini_retry",
+      kind: "gemini" as const,
+      label: "Google Gemini",
+      apiKey: "test-key",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      defaultModel: "gemini-test",
+      imageModel: "gemini-image-test",
+      geminiAutoCache: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await repository.putProvider(provider);
+    const persona = { ...createDefaultPersona(now), providerId: provider.id, model: provider.defaultModel };
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+
+    let streamAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (!String(input).includes(":streamGenerateContent")) return new Response("unexpected", { status: 500 });
+      streamAttempts += 1;
+      if (streamAttempts === 1) {
+        return new Response(
+          JSON.stringify({ error: { code: 503, message: "This model is currently experiencing high demand.", status: "UNAVAILABLE" } }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        `data: {"candidates":[{"content":{"parts":[{"text":"待たせたね"}]}}]}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }));
+
+    const statuses: Array<{ text: string; tone: string }> = [];
+    const result = await new ChatService(repository).send(persona, thread, "混んでいる時間の質問", {
+      onStatus: (text, tone) => statuses.push({ text, tone: tone ?? "info" }),
+    });
+
+    expect(streamAttempts).toBe(2);
+    expect(result.content).toBe("待たせたね");
+    const retryNotice = statuses.find((status) => status.tone === "warning");
+    expect(retryNotice?.text).toContain("Google Geminiが混み合っています");
+    expect(retryNotice?.text).toContain("1/5回目");
+    // The notice must not outlive the wait it explains.
+    expect(statuses.at(-1)?.text).toBe("");
+    const noticeIndex = statuses.findIndex((status) => status.tone === "warning");
+    expect(statuses.slice(noticeIndex + 1).some((status) => status.text === "応答を待っています…")).toBe(true);
+  });
+
+  it("keeps the previous assistant response when regeneration fails", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const now = Date.now();
+    const provider = {
+      id: "provider_gemini_regenerate",
+      kind: "gemini" as const,
+      label: "Google Gemini",
+      apiKey: "test-key",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      defaultModel: "gemini-test",
+      imageModel: "gemini-image-test",
+      geminiAutoCache: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await repository.putProvider(provider);
+    const persona = { ...createDefaultPersona(now), providerId: provider.id, model: provider.defaultModel };
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "既存の会話", createdAt: now, updatedAt: now };
+    const previousMessages: ChatMessage[] = [
+      { id: newId("message"), threadId: thread.id, personaId: persona.id, role: "user", content: "前の質問", createdAt: now, editedAt: null, toolCallId: null, toolName: null, metadata: {} },
+      { id: newId("message"), threadId: thread.id, personaId: persona.id, role: "assistant", content: "前の返答", createdAt: now + 1, editedAt: null, toolCallId: null, toolName: null, metadata: {} },
+    ];
+    await repository.putThread(thread);
+    for (const message of previousMessages) await repository.putMessage(message);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 503, message: "Service unavailable", status: "UNAVAILABLE" } }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    )));
+
+    let caught: unknown;
+    try {
+      await new ChatService(repository).regenerate(persona, thread.id);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ChatOperationError);
+    expect((caught as ChatOperationError).operation).toBe("regenerate");
+    expect((caught as ChatOperationError).rollbackSucceeded).toBe(true);
+    expect(await repository.listMessages(thread.id)).toEqual(previousMessages);
   });
 });

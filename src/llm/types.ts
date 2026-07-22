@@ -1,4 +1,5 @@
 import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import type { RetryNotice } from "./retry";
 
 export interface JsonSchema {
   type: "object";
@@ -30,6 +31,8 @@ export interface ProviderRequest {
   tools: ToolDefinition[];
   toolChoice: "auto" | "none";
   signal?: AbortSignal;
+  /** Called while the provider waits out a retryable HTTP error. */
+  onRetry?: RetryNotice;
 }
 
 export type ProviderEvent =
@@ -46,7 +49,7 @@ export interface ImageGenerationResult {
 export interface LlmProvider {
   readonly config: ProviderConfig;
   stream(request: ProviderRequest): AsyncGenerator<ProviderEvent>;
-  generateImage(prompt: string, signal?: AbortSignal): Promise<ImageGenerationResult>;
+  generateImage(prompt: string, signal?: AbortSignal, onRetry?: RetryNotice): Promise<ImageGenerationResult>;
 }
 
 export class ProviderHttpError extends Error {

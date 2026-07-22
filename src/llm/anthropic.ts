@@ -1,4 +1,5 @@
 import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import { fetchWithRetry } from "./retry";
 import { readSse, safeJson } from "./sse";
 import { assertOk, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
 
@@ -99,12 +100,12 @@ export class AnthropicProvider implements LlmProvider {
       body.tools = request.tools.map((tool) => ({ name: tool.id, description: tool.description, input_schema: tool.inputSchema }));
       body.tool_choice = { type: request.toolChoice };
     }
-    const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/messages`, {
+    const response = await fetchWithRetry(`${this.config.baseUrl.replace(/\/$/, "")}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
       signal: request.signal ?? null,
-    });
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
     await assertOk(response, this.config.label);
     const toolBlocks = new Map<number, AnthropicToolAccumulator>();
     const usage: AnthropicUsageAccumulator = {

@@ -1,4 +1,5 @@
 import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
 import {
   assertOk,
@@ -146,12 +147,12 @@ export class OpenAiProvider implements LlmProvider {
       toolChoice: request.toolChoice,
       store: false,
     });
-    const response = await fetch(endpoint(this.config.baseUrl, "/responses"), {
+    const response = await fetchWithRetry(endpoint(this.config.baseUrl, "/responses"), {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.config.apiKey}` },
       body: JSON.stringify(body),
       signal: request.signal ?? null,
-    });
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
     await assertOk(response, this.config.label);
     const completedItems: Record<string, unknown>[] = [];
     for await (const event of readSse(response)) {
@@ -216,12 +217,12 @@ export class OpenAiProvider implements LlmProvider {
       })),
       tool_choice: request.toolChoice,
     };
-    const response = await fetch(endpoint(this.config.baseUrl, "/chat/completions"), {
+    const response = await fetchWithRetry(endpoint(this.config.baseUrl, "/chat/completions"), {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.config.apiKey}` },
       body: JSON.stringify(body),
       signal: request.signal ?? null,
-    });
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
     await assertOk(response, this.config.label);
     const calls = new Map<number, ToolAccumulator>();
     for await (const event of readSse(response)) {
@@ -267,13 +268,13 @@ export class OpenAiProvider implements LlmProvider {
     }
   }
 
-  async generateImage(prompt: string, signal?: AbortSignal): Promise<ImageGenerationResult> {
-    const response = await fetch(endpoint(this.config.baseUrl, "/images/generations"), {
+  async generateImage(prompt: string, signal?: AbortSignal, onRetry?: RetryNotice): Promise<ImageGenerationResult> {
+    const response = await fetchWithRetry(endpoint(this.config.baseUrl, "/images/generations"), {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.config.apiKey}` },
       body: JSON.stringify({ model: this.config.imageModel, prompt, size: "1024x1024" }),
       signal: signal ?? null,
-    });
+    }, onRetry ? { onRetry } : undefined);
     await assertOk(response, this.config.label);
     const payload = await response.json() as { data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }> };
     const first = payload.data?.[0];

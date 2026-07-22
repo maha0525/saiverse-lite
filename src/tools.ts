@@ -1,4 +1,5 @@
 import type { Persona, ToolCall, ToolId } from "./domain";
+import type { RetryNotice } from "./llm/retry";
 import type { LlmProvider, ToolDefinition } from "./llm/types";
 import type { LiteRepository } from "./storage/repository";
 
@@ -56,6 +57,7 @@ export async function executeTool(
   provider: LlmProvider,
   call: ToolCall,
   signal?: AbortSignal,
+  onRetry?: RetryNotice,
 ): Promise<ToolExecutionResult> {
   if (!persona.toolIds.includes(call.name)) throw new Error(`未登録のツールです: ${call.name}`);
   console.log("[SAIVerse Lite][tool] start", { personaId: persona.id, tool: call.name, callId: call.id });
@@ -78,7 +80,7 @@ export async function executeTool(
   }
   const prompt = typeof call.arguments.prompt === "string" ? call.arguments.prompt.trim() : "";
   if (!prompt) throw new Error("画像生成プロンプトが空です");
-  const image = await provider.generateImage(prompt, signal);
+  const image = await provider.generateImage(prompt, signal, onRetry);
   console.log("[SAIVerse Lite][tool] image_generate complete", { promptLength: prompt.length });
   return {
     content: JSON.stringify({ ok: true, prompt, revisedPrompt: image.revisedPrompt }),

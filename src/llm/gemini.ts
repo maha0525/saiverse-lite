@@ -1,4 +1,5 @@
 import type { ProviderConfig, ToolId } from "../domain";
+import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
 import { assertOk, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
 
@@ -101,12 +102,12 @@ export class GeminiProvider implements LlmProvider {
     if (cacheName) body.cachedContent = cacheName;
     else body.systemInstruction = { parts: [{ text: request.systemPrompt }] };
     try {
-      const response = await fetch(this.api(`models/${encodeURIComponent(request.model)}:streamGenerateContent?alt=sse`), {
+      const response = await fetchWithRetry(this.api(`models/${encodeURIComponent(request.model)}:streamGenerateContent?alt=sse`), {
         method: "POST",
         headers: this.headers(),
         body: JSON.stringify(body),
         signal: request.signal ?? null,
-      });
+      }, request.onRetry ? { onRetry: request.onRetry } : undefined);
       await assertOk(response, this.config.label);
       for await (const event of readSse(response)) {
         const parsed = safeJson(event.data);
@@ -146,8 +147,8 @@ export class GeminiProvider implements LlmProvider {
     }
   }
 
-  async generateImage(prompt: string, signal?: AbortSignal): Promise<ImageGenerationResult> {
-    const response = await fetch(this.api(`models/${encodeURIComponent(this.config.imageModel)}:generateContent`), {
+  async generateImage(prompt: string, signal?: AbortSignal, onRetry?: RetryNotice): Promise<ImageGenerationResult> {
+    const response = await fetchWithRetry(this.api(`models/${encodeURIComponent(this.config.imageModel)}:generateContent`), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({
@@ -155,7 +156,7 @@ export class GeminiProvider implements LlmProvider {
         generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
       }),
       signal: signal ?? null,
-    });
+    }, onRetry ? { onRetry } : undefined);
     await assertOk(response, this.config.label);
     const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string }; text?: string }> } }> };
     const parts = payload.candidates?.[0]?.content?.parts ?? [];

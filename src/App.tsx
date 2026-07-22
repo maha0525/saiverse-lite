@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import logoUrl from "./assets/logo.png";
-import { ChatService } from "./chatService";
+import { ChatService, type ChatStatusTone } from "./chatService";
+import { presentChatError, type ChatErrorPresentation } from "./chatErrors";
+import { ChatErrorNotice } from "./components/ChatErrorNotice";
 import { ChatView } from "./components/ChatView";
 import { DataView } from "./components/DataView";
 import { MemoryView } from "./components/MemoryView";
@@ -60,10 +62,11 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [memories, setMemories] = useState<MemoryEntry[]>([]);
   const [streamingText, setStreamingText] = useState("");
-  const [chatStatus, setChatStatus] = useState("");
+  const [chatStatus, setChatStatus] = useState<{ text: string; tone: ChatStatusTone }>({ text: "", tone: "info" });
   const [sending, setSending] = useState(false);
   const [dataBusy, setDataBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [chatError, setChatError] = useState<ChatErrorPresentation | null>(null);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [wizard, setWizard] = useState<"full" | "consent" | null>(null);
 
@@ -193,25 +196,39 @@ export default function App() {
     await loadPersonaData(selectedPersona.id);
   };
 
-  const send = async (text: string) => {
-    if (!selectedPersona || !activeThread) return;
+  const send = async (text: string): Promise<boolean> => {
+    if (!selectedPersona || !activeThread) return false;
     setSending(true);
     setStreamingText("");
     setNotice("");
+    setChatError(null);
     try {
-      await chatService.send(selectedPersona, activeThread, text, {
-        onDelta: (delta) => setStreamingText((current) => current + delta),
-        onStatus: setChatStatus,
-      });
-      await refreshConversation();
-    } catch (error) {
-      console.error("[SAIVerse Lite][chat] send failed", error);
-      setNotice(`送信できませんでした: ${errorMessage(error)}`);
-      await refreshConversation();
+      try {
+        await chatService.send(selectedPersona, activeThread, text, {
+          onDelta: (delta) => setStreamingText((current) => current + delta),
+          onStatus: (text, tone) => setChatStatus({ text, tone: tone ?? "info" }),
+        });
+      } catch (error) {
+        console.error("[SAIVerse Lite][chat] send failed", error);
+        setChatError(presentChatError(error, "send"));
+        try {
+          await refreshConversation();
+        } catch (refreshError) {
+          console.error("[SAIVerse Lite][chat] refresh after failed send also failed", refreshError);
+        }
+        return false;
+      }
+      try {
+        await refreshConversation();
+      } catch (refreshError) {
+        console.error("[SAIVerse Lite][chat] send succeeded but refresh failed", refreshError);
+        setNotice("送信は完了しましたが、画面の更新に失敗しました。アプリを開き直すと保存済みの会話を読み込めます。");
+      }
+      return true;
     } finally {
       setSending(false);
       setStreamingText("");
-      setChatStatus("");
+      setChatStatus({ text: "", tone: "info" });
     }
   };
 
@@ -229,16 +246,31 @@ export default function App() {
     if (!selectedPersona || !activeThreadId || sending) return;
     setSending(true);
     setStreamingText("");
+    setChatError(null);
     try {
-      await chatService.regenerate(selectedPersona, activeThreadId, {
-        onDelta: (delta) => setStreamingText((current) => current + delta),
-        onStatus: setChatStatus,
-      });
-      await refreshConversation();
-    } catch (error) {
-      setNotice(`再生成できませんでした: ${errorMessage(error)}`);
+      try {
+        await chatService.regenerate(selectedPersona, activeThreadId, {
+          onDelta: (delta) => setStreamingText((current) => current + delta),
+          onStatus: (text, tone) => setChatStatus({ text, tone: tone ?? "info" }),
+        });
+      } catch (error) {
+        console.error("[SAIVerse Lite][chat] regenerate failed", error);
+        setChatError(presentChatError(error, "regenerate"));
+        try {
+          await refreshConversation();
+        } catch (refreshError) {
+          console.error("[SAIVerse Lite][chat] refresh after failed regeneration also failed", refreshError);
+        }
+        return;
+      }
+      try {
+        await refreshConversation();
+      } catch (refreshError) {
+        console.error("[SAIVerse Lite][chat] regeneration succeeded but refresh failed", refreshError);
+        setNotice("再生成は完了しましたが、画面の更新に失敗しました。アプリを開き直すと保存済みの返答を読み込めます。");
+      }
     } finally {
-      setSending(false); setStreamingText(""); setChatStatus("");
+      setSending(false); setStreamingText(""); setChatStatus({ text: "", tone: "info" });
     }
   };
 
@@ -279,7 +311,7 @@ export default function App() {
 
   const content = (() => {
     if (!selectedPersona) return <div className="empty-state"><h2>パートナーを読み込めませんでした</h2></div>;
-    if (view === "chat") return <ChatView persona={selectedPersona} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThread={(id) => void deleteThread(id)} onSend={send} onEdit={editMessage} onRegenerate={regenerate} />;
+    if (view === "chat") return <ChatView persona={selectedPersona} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThread={(id) => void deleteThread(id)} onSend={send} onEdit={editMessage} onRegenerate={regenerate} />;
     if (view === "personas") return <PersonaView personas={personas} providers={providers} selectedId={selectedPersona.id} onSelect={(id) => void selectPersona(id)} onSave={savePersona} onDelete={deletePersona} />;
     if (view === "memory") return <MemoryView persona={selectedPersona} memories={memories} onCreate={createMemory} onEdit={editMemory} onDelete={deleteMemory} />;
     if (view === "data") return <DataView
@@ -328,7 +360,8 @@ export default function App() {
     <div className="app-shell">
       <Nav active={view} onChange={setView} online={online} />
       <main className="main-stage">
-        {notice && view !== "data" && <div className="global-notice" role="alert"><span>{notice}</span><button onClick={() => setNotice("")} aria-label="閉じる">×</button></div>}
+        {chatError && view === "chat" && <ChatErrorNotice error={chatError} onClose={() => setChatError(null)} />}
+        {notice && view !== "data" && <div className="global-notice" role="alert"><span>{notice}</span><button className="notice-close" onClick={() => setNotice("")} aria-label="閉じる">×</button></div>}
         {content}
       </main>
     </div>

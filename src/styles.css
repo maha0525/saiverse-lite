@@ -12,6 +12,7 @@
   --accent-strong: #0e7490;
   --accent-soft: #cffafe;
   --danger: #dc2626;
+  --warning: #b45309;
   --ok: #059669;
   --shadow: 0 8px 24px rgba(15, 23, 42, .06);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -34,6 +35,7 @@
   --accent-strong: #67e8f9;
   --accent-soft: #164e63;
   --danger: #f87171;
+  --warning: #fbbf24;
   --ok: #34d399;
   --shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
@@ -116,7 +118,11 @@ textarea { resize: vertical; line-height: 1.6; }
 .tool-result summary { cursor: pointer; color: var(--accent-strong); font-weight: 700; }
 .tool-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
 .tool-result img { margin: 12px 0; border-radius: 14px; max-height: 440px; }
-.chat-status { width: max-content; max-width: 100%; margin: 0 auto 12px; color: var(--muted); font-size: 12px; }
+.chat-status { width: max-content; max-width: 100%; margin: 0 auto 12px; color: var(--muted); font-size: 12px; text-align: center; }
+.chat-status.warning { display: flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--warning) 12%, var(--surface)); color: var(--warning); font-weight: 600; }
+.chat-status.warning::before { width: 9px; height: 9px; flex: none; border-radius: 50%; background: currentColor; animation: chat-status-pulse 1.4s ease-in-out infinite; content: ""; }
+@keyframes chat-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .chat-status.warning::before { animation: none; } }
 .composer-wrap { padding: 6px max(18px, calc((100% - 820px) / 2)) calc(12px + var(--safe-bottom)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(18px); }
 .conversation-actions { height: 24px; text-align: right; }
 .composer { display: flex; align-items: flex-end; gap: 9px; padding: 6px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 10px 40px color-mix(in srgb, var(--text) 8%, transparent); }
@@ -165,8 +171,18 @@ textarea { resize: vertical; line-height: 1.6; }
 .memory-actions { display: flex; justify-content: flex-end; gap: 14px; }
 .notice, .global-notice { padding: 12px 15px; border: 1px solid var(--accent); border-radius: 12px; background: var(--accent-soft); color: var(--accent-strong); }
 .notice { margin-bottom: 20px; }
-.global-notice { position: fixed; top: 16px; right: 18px; z-index: 50; max-width: min(520px, calc(100vw - 36px)); box-shadow: var(--shadow); display: flex; gap: 16px; align-items: start; }
-.global-notice button { border: 0; background: transparent; color: inherit; font-size: 20px; }
+.global-notice { position: fixed; top: 16px; right: 18px; z-index: 50; width: max-content; max-width: min(520px, calc(100vw - 36px)); max-height: min(72vh, 620px); overflow: auto; box-shadow: var(--shadow); display: flex; gap: 16px; align-items: start; }
+.global-notice .notice-close { flex: 0 0 auto; border: 0; padding: 0; background: transparent; color: inherit; font-size: 20px; line-height: 1; }
+.chat-error-notice { border-color: color-mix(in srgb, var(--danger) 58%, var(--line)); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); color: var(--text); }
+.notice-body { min-width: 0; }
+.notice-title { display: block; padding-right: 4px; font-size: 15px; line-height: 1.45; }
+.notice-message { margin: 5px 0 0; color: var(--text); font-size: 13px; line-height: 1.65; }
+.notice-details { margin-top: 10px; }
+.notice-details summary { cursor: pointer; color: var(--accent-strong); font-size: 12px; font-weight: 700; }
+.notice-details pre { max-height: 180px; margin: 8px 0 0; padding: 9px 10px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); font: 11px/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.notice-detail-actions { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+.notice-detail-actions .text-button { font-size: 12px; }
+.notice-detail-actions span { color: var(--muted); font-size: 11px; }
 .data-card { min-height: 280px; padding: 24px; display: flex; flex-direction: column; }
 .data-card .card-icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent-strong); }
 .data-card h2 { margin: 16px 0 8px; font-size: 18px; font-weight: 600; }

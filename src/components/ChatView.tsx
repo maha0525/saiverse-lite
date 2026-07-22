@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import type { ChatStatusTone } from "../chatService";
 import type { ChatMessage, ConversationThread, Persona } from "../domain";
 import { loadDraft, saveDraft } from "../onboarding";
 
@@ -9,11 +10,12 @@ interface ChatViewProps {
   messages: ChatMessage[];
   streamingText: string;
   status: string;
+  statusTone: ChatStatusTone;
   sending: boolean;
   onSelectThread(id: string): void;
   onCreateThread(): void;
   onDeleteThread(id: string): void;
-  onSend(text: string): Promise<void>;
+  onSend(text: string): Promise<boolean>;
   onEdit(message: ChatMessage, content: string): Promise<void>;
   onRegenerate(): Promise<void>;
 }
@@ -57,6 +59,9 @@ function MessageBubble({ message, persona, onEdit }: { message: ChatMessage; per
 export function ChatView(props: ChatViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const activeThreadRef = useRef(props.activeThreadId);
+  activeThreadRef.current = props.activeThreadId;
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [props.messages, props.streamingText]);
 
   // 打ちかけの言葉をスレッドごとに端末へ自動保存 (事故で閉じても消えない)
@@ -72,10 +77,18 @@ export function ChatView(props: ChatViewProps) {
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const text = draft.trim();
-    if (!text || props.sending || !props.activeThreadId) return;
+    const threadId = props.activeThreadId;
+    if (!text || props.sending || !threadId) return;
     setDraft("");
-    saveDraft(`composer.${props.activeThreadId}`, "");
-    await props.onSend(text);
+    saveDraft(`composer.${threadId}`, "");
+    const sent = await props.onSend(text);
+    if (!sent) {
+      saveDraft(`composer.${threadId}`, text);
+      if (activeThreadRef.current === threadId) {
+        setDraft(text);
+        requestAnimationFrame(() => composerRef.current?.focus());
+      }
+    }
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -112,7 +125,15 @@ export function ChatView(props: ChatViewProps) {
             <div className="message-body"><div className="message-meta"><strong>{props.persona.name}</strong></div><div className="message-content">{props.streamingText}<span className="cursor" /></div></div>
           </article>
         )}
-        {props.status && <div className="chat-status">{props.status}</div>}
+        {props.status && (
+          <div
+            className={props.statusTone === "warning" ? "chat-status warning" : "chat-status"}
+            role="status"
+            aria-live="polite"
+          >
+            {props.status}
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
       <footer className="composer-wrap">
@@ -121,6 +142,7 @@ export function ChatView(props: ChatViewProps) {
         </div>
         <form className="composer" onSubmit={(event) => void submit(event)}>
           <textarea
+            ref={composerRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={keyDown}

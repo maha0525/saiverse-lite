@@ -7,14 +7,35 @@ import {
   type ToolCall,
   type ToolId,
 } from "./domain";
+import { ChatOperationError, type ChatOperation } from "./chatErrors";
 import { createProvider } from "./llm";
+import type { RetryAttempt, RetryNotice } from "./llm/retry";
 import type { LlmProvider, ProviderMessage } from "./llm/types";
 import type { LiteRepository } from "./storage/repository";
 import { executeTool, toolDefinitionsFor } from "./tools";
 
+/** "warning" marks a status the user should notice but need not act on. */
+export type ChatStatusTone = "info" | "warning";
+
 export interface ChatCallbacks {
   onDelta?(text: string): void;
-  onStatus?(status: string): void;
+  onStatus?(status: string, tone?: ChatStatusTone): void;
+}
+
+const TOOL_STATUS: Record<ToolId, string> = {
+  memory_recall: "記憶を確認しています…",
+  image_generate: "画像を生成しています…",
+};
+
+/**
+ * The provider is retrying on its own, so the wait is expected rather than a
+ * failure. The status says who is busy, how long the pause is, and how many
+ * attempts remain, so silence during backoff does not read as a freeze.
+ */
+function retryStatusText(providerLabel: string, attempt: RetryAttempt): string {
+  const seconds = Math.max(1, Math.round(attempt.delayMs / 1000));
+  const reason = attempt.status === 429 ? "の利用制限に達しました" : "が混み合っています";
+  return `${providerLabel}${reason}。約${seconds}秒後に再試行します（${attempt.attempt}/${attempt.maxAttempts}回目）`;
 }
 
 function toolCallsFromMetadata(metadata: Record<string, unknown>): ToolCall[] {
@@ -64,6 +85,37 @@ function usageMetadata(inputTokens: number, outputTokens: number, cachedTokens: 
 export class ChatService {
   constructor(private readonly repository: LiteRepository) {}
 
+  private async rollbackConversation(
+    operation: ChatOperation,
+    thread: ConversationThread,
+    messagesBefore: ChatMessage[],
+    originalError: unknown,
+  ): Promise<ChatOperationError> {
+    let rollbackError: unknown = null;
+    try {
+      const previousIds = new Set(messagesBefore.map((message) => message.id));
+      const currentMessages = await this.repository.listMessages(thread.id);
+      const createdMessages = currentMessages.filter((message) => !previousIds.has(message.id));
+      for (const message of createdMessages) await this.repository.deleteMessage(message.id);
+      for (const message of messagesBefore) await this.repository.putMessage(message);
+      await this.repository.putThread(thread);
+      console.info("[SAIVerse Lite][chat] failed operation rolled back", {
+        operation,
+        threadId: thread.id,
+        removedMessages: createdMessages.length,
+        restoredMessages: messagesBefore.length,
+      });
+    } catch (error) {
+      rollbackError = error;
+      console.error("[SAIVerse Lite][chat] failed to roll back conversation", {
+        operation,
+        threadId: thread.id,
+        error,
+      });
+    }
+    return new ChatOperationError(operation, originalError, rollbackError === null, rollbackError);
+  }
+
   async send(
     persona: Persona,
     thread: ConversationThread,
@@ -71,6 +123,7 @@ export class ChatService {
     callbacks: ChatCallbacks = {},
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
+    const messagesBefore = await this.repository.listMessages(thread.id);
     const now = Date.now();
     const userMessage: ChatMessage = {
       id: newId("message"),
@@ -84,9 +137,13 @@ export class ChatService {
       toolName: null,
       metadata: {},
     };
-    await this.repository.putMessage(userMessage);
-    await this.repository.putThread({ ...thread, updatedAt: now, title: thread.title === "新しい会話" ? content.trim().slice(0, 36) || thread.title : thread.title });
-    return this.continueConversation(persona, thread.id, callbacks, signal);
+    try {
+      await this.repository.putMessage(userMessage);
+      await this.repository.putThread({ ...thread, updatedAt: now, title: thread.title === "新しい会話" ? content.trim().slice(0, 36) || thread.title : thread.title });
+      return await this.continueConversation(persona, thread.id, callbacks, signal);
+    } catch (error) {
+      throw await this.rollbackConversation("send", thread, messagesBefore, error);
+    }
   }
 
   async regenerate(
@@ -95,10 +152,16 @@ export class ChatService {
     callbacks: ChatCallbacks = {},
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
+    const thread = await this.repository.getThread(threadId);
+    if (!thread) throw new Error("会話スレッドが見つかりません");
     const messages = await this.repository.listMessages(threadId);
     const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant" && toolCallsFromMetadata(message.metadata).length === 0);
-    if (lastAssistant) await this.repository.deleteMessage(lastAssistant.id);
-    return this.continueConversation(persona, threadId, callbacks, signal);
+    try {
+      if (lastAssistant) await this.repository.deleteMessage(lastAssistant.id);
+      return await this.continueConversation(persona, threadId, callbacks, signal);
+    } catch (error) {
+      throw await this.rollbackConversation("regenerate", thread, messages, error);
+    }
   }
 
   private async continueConversation(
@@ -118,7 +181,13 @@ export class ChatService {
     let finalMessage: ChatMessage | null = null;
 
     for (let round = 0; round < 4; round += 1) {
-      callbacks.onStatus?.(round === 0 ? "応答を待っています…" : "ツールの結果を渡しています…");
+      const baseStatus = round === 0 ? "応答を待っています…" : "ツールの結果を渡しています…";
+      callbacks.onStatus?.(baseStatus);
+      let retrying = false;
+      const onRetry: RetryNotice = (attempt) => {
+        retrying = true;
+        callbacks.onStatus?.(retryStatusText(config.label, attempt), "warning");
+      };
       let text = "";
       const calls: ToolCall[] = [];
       let inputTokens = 0;
@@ -133,8 +202,14 @@ export class ChatService {
         messages: recent,
         tools: definitions,
         toolChoice: "auto",
+        onRetry,
         ...(signal ? { signal } : {}),
       })) {
+        // Reaching the stream means the provider answered; drop any stale retry notice.
+        if (retrying) {
+          retrying = false;
+          callbacks.onStatus?.(baseStatus);
+        }
         if (event.type === "text") {
           text += event.text;
           callbacks.onDelta?.(event.text);
@@ -172,11 +247,13 @@ export class ChatService {
         break;
       }
       for (const call of calls) {
-        callbacks.onStatus?.(`${call.name} を実行しています…`);
+        callbacks.onStatus?.(TOOL_STATUS[call.name]);
         let resultContent: string;
         let resultMetadata: Record<string, unknown>;
         try {
-          const result = await executeTool(this.repository, persona, provider, call, signal);
+          const result = await executeTool(this.repository, persona, provider, call, signal, (attempt) => {
+            callbacks.onStatus?.(retryStatusText(config.label, attempt), "warning");
+          });
           resultContent = result.content;
           resultMetadata = result.metadata;
         } catch (error) {

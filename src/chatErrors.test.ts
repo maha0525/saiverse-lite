@@ -21,7 +21,10 @@ describe("chat error presentation", () => {
     // The model that actually failed is not always the one in settings, so it
     // has to be named rather than implied.
     expect(presentation.message).toContain("モデル「gemini-3.5-flash」");
-    expect(presentation.message).toContain("パートナー側の指定が優先されます");
+    expect(presentation.message).toContain("パートナー画面の「モデルID」");
+    // The settings screen no longer has a chat-model field; pointing at one
+    // would send the user hunting for something that is not there.
+    expect(presentation.message).not.toContain("会話モデルID");
     expect(presentation.message).toContain("入力欄へ戻しました");
     expect(presentation.detail).toContain("Google Gemini API error (503)");
     expect(presentation.detail).toContain("model: gemini-3.5-flash");

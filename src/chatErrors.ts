@@ -94,8 +94,7 @@ export function presentChatError(error: unknown, fallbackOperation: ChatOperatio
         title: "いま使えないモデルです",
         message: withState(
           `${provider}側が混み合っていて、${named}が応答を返せません。あなたの操作や設定が原因ではありません。`
-          + `この混雑はモデルごとに起きるため、直らないときはパートナー画面の「モデルID」を別のモデルへ変えてください`
-          + `（設定画面の会話モデルIDより、パートナー側の指定が優先されます）。`,
+          + `この混雑はモデルごとに起きるため、直らないときはパートナー画面の「モデルID」を別のモデルへ変えてください。`,
           state,
         ),
         detail,

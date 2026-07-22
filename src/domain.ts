@@ -31,6 +31,12 @@ export interface ToolCall {
   id: string;
   name: ToolId;
   arguments: Record<string, unknown>;
+  /**
+   * Opaque token Gemini 3.x attaches to a functionCall part. It must be echoed
+   * back verbatim when the call is replayed in history, or the next turn is
+   * rejected with 400 INVALID_ARGUMENT. Absent on providers that do not use it.
+   */
+  thoughtSignature?: string;
 }
 
 export interface ChatMessage {

@@ -127,7 +127,7 @@ describe("ChatService with mock provider", () => {
     expect(result.content).toBe("待たせたね");
     const retryNotice = statuses.find((status) => status.tone === "warning");
     expect(retryNotice?.text).toContain("Google Geminiが混み合っています");
-    expect(retryNotice?.text).toContain("1/5回目");
+    expect(retryNotice?.text).toContain(`1/${retryDefaults.maxAttempts}回目`);
     // The notice must not outlive the wait it explains.
     expect(statuses.at(-1)?.text).toBe("");
     const noticeIndex = statuses.findIndex((status) => status.tone === "warning");

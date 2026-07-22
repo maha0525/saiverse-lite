@@ -24,7 +24,8 @@ export interface ChatErrorPresentation {
 
 function rawError(error: unknown): string {
   if (error instanceof ProviderHttpError) {
-    return `${error.provider} API error (${error.status})\n${error.responseBody}`;
+    const model = error.model ? `\nmodel: ${error.model}` : "";
+    return `${error.provider} API error (${error.status})${model}\n${error.responseBody}`;
   }
   if (error instanceof Error) return error.stack || `${error.name}: ${error.message}`;
   return String(error);
@@ -59,13 +60,44 @@ export function presentChatError(error: unknown, fallbackOperation: ChatOperatio
   if (original instanceof ProviderHttpError) {
     const provider = original.provider;
     const body = original.responseBody.toLowerCase();
-    const overloaded = original.status === 429
-      || /high demand|unavailable|overload|overloaded|capacity|temporar/.test(body);
 
-    if (overloaded) {
+    // A 429 is the caller's own allowance running out, not the service being
+    // busy. Calling it congestion sends the user to wait for a spike that will
+    // never pass, and hides the setting they actually need to change.
+    if (original.status === 429) {
+      if (/perday|per day|daily/.test(body)) {
+        return {
+          title: "今日の利用枠を使い切りました",
+          message: withState(
+            `${provider}のAPIキーに割り当てられた1日分の上限に達しています。混雑ではないので待っても戻りません。日付が変わるまで待つか、設定画面で別のモデルへ切り替えるか、${provider}側で有料プランに切り替えてください。`,
+            state,
+          ),
+          detail,
+        };
+      }
       return {
-        title: `${provider}が混み合っています`,
-        message: withState(`${provider}側の一時的な混雑です。あなたの操作や設定が原因ではありません。少し待ってからもう一度お試しください。`, state),
+        title: "送信のペースが上限に達しました",
+        message: withState(
+          `${provider}のAPIキーが、短い時間に送れる回数の上限に達しました。無料枠では特に低く設定されています。少し置いてからもう一度お試しください。繰り返し出る場合は設定画面で別のモデルへ切り替えてください。`,
+          state,
+        ),
+        detail,
+      };
+    }
+
+    if (/high demand|unavailable|overload|overloaded|capacity|temporar/.test(body)) {
+      // Naming the model matters: a persona carries its own model that wins over
+      // the one in settings, so "I already switched models" and "the failing
+      // model" are routinely two different things.
+      const named = original.model ? `モデル「${original.model}」` : "選んでいるモデル";
+      return {
+        title: "いま使えないモデルです",
+        message: withState(
+          `${provider}側が混み合っていて、${named}が応答を返せません。あなたの操作や設定が原因ではありません。`
+          + `この混雑はモデルごとに起きるため、直らないときはパートナー画面の「モデルID」を別のモデルへ変えてください`
+          + `（設定画面の会話モデルIDより、パートナー側の指定が優先されます）。`,
+          state,
+        ),
         detail,
       };
     }

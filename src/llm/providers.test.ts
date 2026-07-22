@@ -49,6 +49,81 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Gemini tool-call round trip", () => {
+  const streamWithSignedCall = `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"memory_recall","args":{"query":"猫"}},"thoughtSignature":"SIG-abc123"}]}}]}\n\n`;
+
+  it("keeps the thought signature Gemini attaches to a function call", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(streamWithSignedCall, {
+      status: 200, headers: { "content-type": "text/event-stream" },
+    })));
+    const provider = new GeminiProvider({ ...config("gemini"), geminiAutoCache: false });
+
+    const events: ProviderEvent[] = [];
+    for await (const event of provider.stream(request([user("猫の名前は？")]))) events.push(event);
+
+    const call = events.find((event) => event.type === "tool-call");
+    expect(call).toBeDefined();
+    expect(call?.type === "tool-call" && call.call.thoughtSignature).toBe("SIG-abc123");
+  });
+
+  it("replays the signature on the next turn, which is the request that used to 400", async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response(`data: {"candidates":[{"content":{"parts":[{"text":"ミケだよ"}]}}]}\n\n`, {
+        status: 200, headers: { "content-type": "text/event-stream" },
+      });
+    }));
+    const provider = new GeminiProvider({ ...config("gemini"), geminiAutoCache: false });
+
+    const history: ProviderRequest["messages"] = [
+      user("猫の名前は？"),
+      {
+        role: "assistant", content: "", toolCallId: null, toolName: null,
+        toolCalls: [{ id: "gemini_1", name: "memory_recall", arguments: { query: "猫" }, thoughtSignature: "SIG-abc123" }],
+      },
+      { role: "tool", content: '{"memories":["ミケ"]}', toolCallId: "gemini_1", toolName: "memory_recall", toolCalls: [] },
+    ];
+    for await (const _event of provider.stream(request(history))) { /* drain */ }
+
+    const sent = JSON.parse(bodies[0] ?? "{}") as { contents: Array<{ parts: Array<Record<string, unknown>> }> };
+    const callPart = sent.contents.flatMap((content) => content.parts).find((part) => part.functionCall);
+    expect(callPart?.thoughtSignature).toBe("SIG-abc123");
+    // The tool result must stay a real functionResponse when the call was replayable.
+    expect(sent.contents.flatMap((c) => c.parts).some((part) => part.functionResponse)).toBe(true);
+  });
+
+  it("degrades an unsigned legacy call to text instead of failing the turn forever", async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response(`data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n`, {
+        status: 200, headers: { "content-type": "text/event-stream" },
+      });
+    }));
+    const provider = new GeminiProvider({ ...config("gemini"), geminiAutoCache: false });
+
+    // Saved before signatures were captured: no thoughtSignature on the call.
+    const history: ProviderRequest["messages"] = [
+      user("猫の名前は？"),
+      {
+        role: "assistant", content: "", toolCallId: null, toolName: null,
+        toolCalls: [{ id: "gemini_old", name: "memory_recall", arguments: { query: "猫" } }],
+      },
+      { role: "tool", content: '{"memories":["ミケ"]}', toolCallId: "gemini_old", toolName: "memory_recall", toolCalls: [] },
+    ];
+    for await (const _event of provider.stream(request(history))) { /* drain */ }
+
+    const sent = JSON.parse(bodies[0] ?? "{}") as { contents: Array<{ parts: Array<Record<string, unknown>> }> };
+    const parts = sent.contents.flatMap((content) => content.parts);
+    // Nothing Gemini can reject, and the recalled content is still in context.
+    expect(parts.some((part) => part.functionCall)).toBe(false);
+    expect(parts.some((part) => part.functionResponse)).toBe(false);
+    expect(JSON.stringify(parts)).toContain("memory_recall");
+    expect(JSON.stringify(parts)).toContain("ミケ");
+  });
+});
+
 describe("provider transports", () => {
   it("uses and always deletes a Gemini explicit cache", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];

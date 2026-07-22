@@ -106,7 +106,7 @@ export class AnthropicProvider implements LlmProvider {
       body: JSON.stringify(body),
       signal: request.signal ?? null,
     }, request.onRetry ? { onRetry: request.onRetry } : undefined);
-    await assertOk(response, this.config.label);
+    await assertOk(response, this.config.label, request.model);
     const toolBlocks = new Map<number, AnthropicToolAccumulator>();
     const usage: AnthropicUsageAccumulator = {
       rawInputTokens: 0,

@@ -9,20 +9,42 @@ interface GeminiContent { role: "user" | "model"; parts: GeminiPart[] }
 function geminiMessages(messages: ProviderMessage[], memoryContext: string): GeminiContent[] {
   const result: GeminiContent[] = [];
   if (memoryContext) result.push({ role: "user", parts: [{ text: `【長期記憶（システム提供）】\n${memoryContext}` }] });
+  // Calls saved before signatures were captured cannot be replayed as
+  // functionCall parts - Gemini 3.x rejects the whole turn with 400. Rendering
+  // those as plain text keeps existing threads usable and keeps the information,
+  // instead of leaving them permanently unanswerable.
+  let lastCallWasReplayable = false;
   for (const message of messages) {
     if (message.role === "tool") {
-      result.push({ role: "user", parts: [{ functionResponse: { name: message.toolName, response: { result: message.content } } }] });
-    } else if (message.role === "assistant" && message.toolCalls.length > 0) {
-      result.push({
-        role: "model",
-        parts: [
-          ...(message.content ? [{ text: message.content }] : []),
-          ...message.toolCalls.map((call) => ({ functionCall: { name: call.name, args: call.arguments } })),
-        ],
-      });
-    } else {
-      result.push({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] });
+      result.push(lastCallWasReplayable
+        ? { role: "user", parts: [{ functionResponse: { name: message.toolName, response: { result: message.content } } }] }
+        : { role: "user", parts: [{ text: `[${message.toolName ?? "ツール"}の結果] ${message.content}` }] });
+      continue;
     }
+    if (message.role === "assistant" && message.toolCalls.length > 0) {
+      lastCallWasReplayable = message.toolCalls.every((call) => Boolean(call.thoughtSignature));
+      if (lastCallWasReplayable) {
+        result.push({
+          role: "model",
+          parts: [
+            ...(message.content ? [{ text: message.content }] : []),
+            ...message.toolCalls.map((call) => ({
+              functionCall: { name: call.name, args: call.arguments },
+              ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
+            })),
+          ],
+        });
+      } else {
+        const described = message.toolCalls.map((call) => `${call.name}(${JSON.stringify(call.arguments)})`).join(", ");
+        result.push({
+          role: "model",
+          parts: [{ text: `${message.content ? `${message.content}\n` : ""}[ツール呼び出し: ${described}]` }],
+        });
+      }
+      continue;
+    }
+    lastCallWasReplayable = false;
+    result.push({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] });
   }
   return result;
 }
@@ -108,7 +130,7 @@ export class GeminiProvider implements LlmProvider {
         body: JSON.stringify(body),
         signal: request.signal ?? null,
       }, request.onRetry ? { onRetry: request.onRetry } : undefined);
-      await assertOk(response, this.config.label);
+      await assertOk(response, this.config.label, request.model);
       for await (const event of readSse(response)) {
         const parsed = safeJson(event.data);
         if (!parsed) continue;
@@ -121,12 +143,16 @@ export class GeminiProvider implements LlmProvider {
             if (typeof part.text === "string" && part.text) yield { type: "text", text: part.text };
             const fn = part.functionCall as Record<string, unknown> | undefined;
             if (fn && typeof fn.name === "string") {
+              // Gemini 3.x demands this token back when the call is replayed;
+              // dropping it here is what fails the *next* request, not this one.
+              const signature = part.thoughtSignature ?? part.thought_signature;
               yield {
                 type: "tool-call",
                 call: {
                   id: `gemini_${crypto.randomUUID()}`,
                   name: fn.name as ToolId,
                   arguments: typeof fn.args === "object" && fn.args !== null ? fn.args as Record<string, unknown> : {},
+                  ...(typeof signature === "string" && signature ? { thoughtSignature: signature } : {}),
                 },
               };
             }
@@ -157,7 +183,7 @@ export class GeminiProvider implements LlmProvider {
       }),
       signal: signal ?? null,
     }, onRetry ? { onRetry } : undefined);
-    await assertOk(response, this.config.label);
+    await assertOk(response, this.config.label, this.config.imageModel);
     const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string }; text?: string }> } }> };
     const parts = payload.candidates?.[0]?.content?.parts ?? [];
     const image = parts.find((part) => part.inlineData?.data)?.inlineData;

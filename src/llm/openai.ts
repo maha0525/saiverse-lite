@@ -153,7 +153,7 @@ export class OpenAiProvider implements LlmProvider {
       body: JSON.stringify(body),
       signal: request.signal ?? null,
     }, request.onRetry ? { onRetry: request.onRetry } : undefined);
-    await assertOk(response, this.config.label);
+    await assertOk(response, this.config.label, request.model);
     const completedItems: Record<string, unknown>[] = [];
     for await (const event of readSse(response)) {
       const parsed = safeJson(event.data);
@@ -223,7 +223,7 @@ export class OpenAiProvider implements LlmProvider {
       body: JSON.stringify(body),
       signal: request.signal ?? null,
     }, request.onRetry ? { onRetry: request.onRetry } : undefined);
-    await assertOk(response, this.config.label);
+    await assertOk(response, this.config.label, request.model);
     const calls = new Map<number, ToolAccumulator>();
     for await (const event of readSse(response)) {
       if (event.data === "[DONE]") break;
@@ -275,7 +275,7 @@ export class OpenAiProvider implements LlmProvider {
       body: JSON.stringify({ model: this.config.imageModel, prompt, size: "1024x1024" }),
       signal: signal ?? null,
     }, onRetry ? { onRetry } : undefined);
-    await assertOk(response, this.config.label);
+    await assertOk(response, this.config.label, this.config.imageModel);
     const payload = await response.json() as { data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }> };
     const first = payload.data?.[0];
     if (!first) throw new Error("画像生成レスポンスに画像がありません");

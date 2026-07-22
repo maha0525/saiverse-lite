@@ -57,15 +57,21 @@ export class ProviderHttpError extends Error {
     readonly provider: string,
     readonly status: number,
     readonly responseBody: string,
+    /**
+     * The model actually called. A persona carries its own model that overrides
+     * the provider's, so the failing model is not always the one the user last
+     * typed into settings - without naming it here, that mismatch is invisible.
+     */
+    readonly model: string | null = null,
   ) {
-    super(`${provider} API error (${status}): ${responseBody.slice(0, 500)}`);
+    super(`${provider} API error (${status})${model ? ` [model: ${model}]` : ""}: ${responseBody.slice(0, 500)}`);
     this.name = "ProviderHttpError";
   }
 }
 
-export async function assertOk(response: Response, provider: string): Promise<void> {
+export async function assertOk(response: Response, provider: string, model?: string): Promise<void> {
   if (response.ok) return;
   const body = await response.text();
-  console.error(`[SAIVerse Lite][${provider}] HTTP error`, { status: response.status, body: body.slice(0, 1000) });
-  throw new ProviderHttpError(provider, response.status, body);
+  console.error(`[SAIVerse Lite][${provider}] HTTP error`, { status: response.status, model, body: body.slice(0, 1000) });
+  throw new ProviderHttpError(provider, response.status, body, model ?? null);
 }

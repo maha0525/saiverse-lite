@@ -35,7 +35,11 @@ const TOOL_STATUS: Record<ToolId, string> = {
 function retryStatusText(providerLabel: string, attempt: RetryAttempt): string {
   const seconds = Math.max(1, Math.round(attempt.delayMs / 1000));
   const reason = attempt.status === 429 ? "の利用制限に達しました" : "が混み合っています";
-  return `${providerLabel}${reason}。約${seconds}秒後に再試行します（${attempt.attempt}/${attempt.maxAttempts}回目）`;
+  // A long pause reads as a hang unless the user knows the wait was dictated.
+  const wait = attempt.serverRequested
+    ? `${providerLabel}の指示どおり約${seconds}秒待って再試行します`
+    : `約${seconds}秒後に再試行します`;
+  return `${providerLabel}${reason}。${wait}（${attempt.attempt}/${attempt.maxAttempts}回目）`;
 }
 
 function toolCallsFromMetadata(metadata: Record<string, unknown>): ToolCall[] {
@@ -48,6 +52,10 @@ function toolCallsFromMetadata(metadata: Record<string, unknown>): ToolCall[] {
       id: item.id,
       name: item.name,
       arguments: typeof item.arguments === "object" && item.arguments !== null ? item.arguments as Record<string, unknown> : {},
+      // Must survive the round trip through storage: the next request replays it.
+      ...(typeof item.thoughtSignature === "string" && item.thoughtSignature
+        ? { thoughtSignature: item.thoughtSignature }
+        : {}),
     }];
   });
 }

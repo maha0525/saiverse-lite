@@ -2,6 +2,8 @@
 // 手順の更新はこのファイルだけで完結する。SAIVerse 本体へ移植する際もこのペアごと持っていく。
 // 手順は 2026-07 時点の各社コンソールに基づく。画面の文言は各社の更新で変わることがある。
 
+import { DEFAULT_CHAT_MODEL } from "./providerDefaults";
+
 export type GuideProviderId = "gemini" | "openai" | "anthropic";
 
 export interface GuideStep {
@@ -41,8 +43,8 @@ export const API_KEY_GUIDES: Record<GuideProviderId, ApiKeyGuideData> = {
     id: "gemini",
     name: "Google Gemini",
     tagline: "無料枠あり・クレジットカード不要。はじめての1本におすすめ。",
-    costNote: "はじめは 0 円で使えます。無料か有料かは API キーごとに最初から決まっていて (下の折りたたみを参照)、請求先を設定していないキーで課金が始まることはありません。推奨の Gemini 3.5 Flash は日本語の会話がとても自然で、無料キーで 1日 20 往復まで話せます (目安)。",
-    recommendedModel: "gemini-3.5-flash",
+    costNote: "はじめは 0 円で使えます。無料か有料かは API キーごとに最初から決まっていて (下の折りたたみを参照)、請求先を設定していないキーで課金が始まることはありません。推奨の Gemini 3.6 Flash は日本語の会話がとても自然で、無料キーで 1日 20 往復まで話せます (目安)。",
+    recommendedModel: DEFAULT_CHAT_MODEL.gemini,
     keyPrefixHint: "AIza で始まる文字列",
     steps: [
       {
@@ -82,7 +84,7 @@ export const API_KEY_GUIDES: Record<GuideProviderId, ApiKeyGuideData> = {
     name: "OpenAI (ChatGPT の会社)",
     tagline: "ChatGPT と同じモデルを API で。事前にクレジット購入が必要。",
     costNote: "最低 $5 (約数百円〜) のクレジット購入が必要です。軽量モデルなら 1 往復あたり数円以下が目安です。ChatGPT Go・Plus・Pro の契約とは別物なので注意。会話データの提供と引き換えに毎日の無料トークンがもらえる制度もあります (下の折りたたみを参照)。",
-    recommendedModel: "gpt-5.6-terra",
+    recommendedModel: DEFAULT_CHAT_MODEL.openai,
     keyPrefixHint: "sk- で始まる文字列",
     steps: [
       {
@@ -125,7 +127,7 @@ export const API_KEY_GUIDES: Record<GuideProviderId, ApiKeyGuideData> = {
     name: "Anthropic (Claude の会社)",
     tagline: "Claude を API で。手順は3社で最短、料金は最高クラス。",
     costNote: "クレジットの購入が必要で、無料枠はありません。料金は3社で最も高く、推奨の Sonnet 5 だと会話が育つにつれ 1 往復 20 円前後になることもあります (使い方で大きく変わります)。Claude の人格と文章を何より大切にしたい人向けです。Claude Pro / Max の契約とは別物なので注意。",
-    recommendedModel: "claude-sonnet-5",
+    recommendedModel: DEFAULT_CHAT_MODEL.anthropic,
     keyPrefixHint: "sk-ant- で始まる文字列",
     steps: [
       {

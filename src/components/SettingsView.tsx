@@ -2,6 +2,7 @@ import { ExternalLink } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { newId, type AnthropicCacheTtl, type AppSettings, type ProviderConfig, type ProviderKind } from "../domain";
 import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
+import { DEFAULT_BASE_URL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_LABEL } from "../providerDefaults";
 import { THIRD_PARTY_LICENSES } from "../thirdPartyLicenses";
 import { LegalModal } from "./LegalModal";
 
@@ -20,17 +21,13 @@ interface SettingsViewProps {
 
 function newProvider(kind: ProviderKind): ProviderConfig {
   const now = Date.now();
-  const defaults: Record<ProviderKind, Pick<ProviderConfig, "label" | "baseUrl" | "defaultModel" | "imageModel">> = {
-    mock: { label: "モック（APIキー不要）", baseUrl: "mock://local", defaultModel: "mock-friendly", imageModel: "mock-image" },
-    openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", defaultModel: "", imageModel: "gpt-image-1" },
-    anthropic: { label: "Anthropic", baseUrl: "https://api.anthropic.com/v1", defaultModel: "", imageModel: "" },
-    gemini: { label: "Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "", imageModel: "gemini-2.5-flash-image" },
-    "openai-compatible": { label: "OpenAI互換", baseUrl: "http://127.0.0.1:1234/v1", defaultModel: "", imageModel: "" },
-  };
   return {
     id: newId("provider"),
     kind,
-    ...defaults[kind],
+    label: DEFAULT_LABEL[kind],
+    baseUrl: DEFAULT_BASE_URL[kind],
+    defaultModel: DEFAULT_CHAT_MODEL[kind],
+    imageModel: DEFAULT_IMAGE_MODEL[kind],
     apiKey: "",
     geminiAutoCache: true,
     createdAt: now,
@@ -49,7 +46,9 @@ export function SettingsView(props: SettingsViewProps) {
 
   const submitProvider = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.label.trim() || !draft.defaultModel.trim()) return;
+    // defaultModel is no longer typed here, and a custom endpoint legitimately
+    // has none: the persona screen is where that gets chosen.
+    if (!draft.label.trim()) return;
     await props.onSaveProvider({ ...draft, updatedAt: Date.now() });
     setSelectedId(draft.id);
   };
@@ -72,7 +71,7 @@ export function SettingsView(props: SettingsViewProps) {
           <label className="field"><span>表示名</span><input value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} required /></label>
           <label className="field"><span>APIキー</span><input type="password" autoComplete="off" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={draft.kind === "mock" ? "不要" : "端末内に保存"} disabled={draft.kind === "mock"} /></label>
           <label className="field"><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} required /></label>
-          <div className="field-grid"><label className="field"><span>会話モデルID</span><input value={draft.defaultModel} onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })} required /></label><label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /></label></div>
+          <label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /><small>会話に使うモデルはパートナーごとに選びます。パートナー画面の「モデルID」で変更してください。</small></label>
           {draft.kind === "gemini" && <label className="toggle"><input type="checkbox" checked={draft.geminiAutoCache} onChange={(event) => setDraft({ ...draft, geminiAutoCache: event.target.checked })} /><span><strong>Gemini 自動キャッシュ</strong><small>create → generate → delete。短い入力は通常コールへ戻します。</small></span></label>}
           {draft.kind === "anthropic" && <label className="field"><span>プロンプトキャッシュ</span><select value={draft.anthropicCacheTtl ?? "none"} onChange={(event) => setDraft({ ...draft, anthropicCacheTtl: event.target.value as AnthropicCacheTtl })}>
             <option value="none">なし (既定)</option>

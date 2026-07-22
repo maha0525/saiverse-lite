@@ -171,7 +171,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
   const saveProviderAndContinue = async () => {
     if (!drafts.providerChoice) return;
     if (drafts.providerChoice === "later") { setStep("done"); return; }
-    if (!drafts.apiKey.trim() || !drafts.model.trim()) return;
+    if (!drafts.apiKey.trim()) return;
     setBusy(true);
     try {
       const defaults = PROVIDER_DEFAULTS[drafts.providerChoice];
@@ -366,7 +366,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
               <>
                 <ApiKeyGuide guide={guide} />
                 <label className="field"><span>APIキー <KeyRound size={12} aria-hidden="true" /></span><input type="password" autoComplete="off" value={drafts.apiKey} onChange={(event) => { setTestResult(null); patchDrafts({ apiKey: event.target.value }); }} placeholder={guide.keyPrefixHint} /></label>
-                <label className="field"><span>モデルID (おすすめを入れてあります)</span><input value={drafts.model} onChange={(event) => patchDrafts({ model: event.target.value })} /></label>
+                <p className="field-note">使うモデルは <strong>{guide.recommendedModel}</strong> です。あとでパートナー画面から変えられます。</p>
                 {drafts.providerChoice === "anthropic" && (
                   <label className="field"><span>プロンプトキャッシュ (費用を抑える設定)</span>
                     <select value={drafts.anthropicCacheTtl} onChange={(event) => patchDrafts({ anthropicCacheTtl: event.target.value as AnthropicCacheTtl })}>
@@ -385,7 +385,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
             )}
             <div className="wizard-actions">
               <button className="text-button" onClick={() => setStep(drafts.fork ? "path" : "fork")}><ArrowLeft size={14} /> 戻る</button>
-              <button className="button" disabled={busy || !drafts.providerChoice || (drafts.providerChoice !== "later" && (!drafts.apiKey.trim() || !drafts.model.trim()))} onClick={() => void saveProviderAndContinue()}>
+              <button className="button" disabled={busy || !drafts.providerChoice || (drafts.providerChoice !== "later" && !drafts.apiKey.trim())} onClick={() => void saveProviderAndContinue()}>
                 {drafts.providerChoice === "later" ? "お試しで進む" : "保存して進む"}<ArrowRight size={16} />
               </button>
             </div>

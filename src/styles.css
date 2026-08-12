@@ -167,7 +167,6 @@ textarea { resize: vertical; line-height: 1.6; }
 .memory-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .memory-card time { color: var(--muted); font-size: 11px; }
 .memory-kind { padding: 4px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
-.memory-kind.summary { background: var(--accent-soft); color: var(--accent-strong); }
 .memory-card p { line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; }
 .memory-actions { display: flex; justify-content: flex-end; gap: 14px; }
 .notice, .global-notice { padding: 12px 15px; border: 1px solid var(--accent); border-radius: 12px; background: var(--accent-soft); color: var(--accent-strong); }

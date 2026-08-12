@@ -52,7 +52,7 @@ export interface ChatMessage {
   metadata: Record<string, unknown>;
 }
 
-export type MemoryKind = "summary" | "note";
+export type MemoryKind = "note";
 
 export interface MemoryEntry {
   id: string;
@@ -85,8 +85,6 @@ export interface AppSettings {
   theme: ThemeMode;
   userName: string;
   userAvatarDataUrl: string | null;
-  autoSummaryEnabled: boolean;
-  summaryEveryMessages: number;
   recentContextMessages: number;
   storagePersisted: boolean | null;
   /** 同意済みの法務文書バージョン (legal.ts の LEGAL_VERSION)。未同意は undefined。加算的な任意フィールド (FORMATS.md §6)。 */
@@ -108,11 +106,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   userName: "",
   userAvatarDataUrl: null,
-  autoSummaryEnabled: false,
-  summaryEveryMessages: 12,
   recentContextMessages: 24,
   storagePersisted: null,
 };
+
+export function normalizeSettings(value: unknown): AppSettings {
+  const current = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+  delete current.autoSummaryEnabled;
+  delete current.summaryEveryMessages;
+  return { ...DEFAULT_SETTINGS, ...(current as Partial<AppSettings>), id: "app" };
+}
+
+export function isRetiredAutomaticSummary(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && (value as Record<string, unknown>).kind === "summary";
+}
 
 export function newId(prefix: string): string {
   const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;

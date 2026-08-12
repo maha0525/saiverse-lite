@@ -2,6 +2,8 @@ import {
   DEFAULT_SETTINGS,
   createDefaultPersona,
   createDefaultProvider,
+  isRetiredAutomaticSummary,
+  normalizeSettings,
   type AppSettings,
   type ChatMessage,
   type ConversationThread,
@@ -27,6 +29,12 @@ export class MemoryRepository implements LiteRepository {
   async initialize(): Promise<void> {
     if (this.providers.size === 0) this.providers.set("provider_mock", createDefaultProvider(1));
     if (this.personas.size === 0) this.personas.set("persona_first", createDefaultPersona(1));
+    const retiredSummaries = [...this.memories.values()].filter(isRetiredAutomaticSummary);
+    for (const memory of retiredSummaries) this.memories.delete(memory.id);
+    this.settings = normalizeSettings(this.settings);
+    if (retiredSummaries.length > 0) {
+      console.info("[SAIVerse Lite][memory] retired automatic summaries removed", { count: retiredSummaries.length });
+    }
   }
 
   async listPersonas(): Promise<Persona[]> { return [...this.personas.values()].sort(byUpdatedDesc); }
@@ -69,19 +77,21 @@ export class MemoryRepository implements LiteRepository {
   async putMessage(value: ChatMessage): Promise<void> { this.messages.set(value.id, structuredClone(value)); }
   async deleteMessage(id: string): Promise<void> {
     const deleted = this.messages.delete(id);
-    let deletedSummaries = 0;
-    for (const memory of [...this.memories.values()]) {
-      if (memory.kind !== "summary" || !memory.sourceMessageIds.includes(id)) continue;
-      this.memories.delete(memory.id);
-      deletedSummaries += 1;
-    }
-    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted, deletedSummaries });
+    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted });
   }
 
   async listMemories(personaId: string): Promise<MemoryEntry[]> {
-    return [...this.memories.values()].filter((item) => item.personaId === personaId).sort(byUpdatedDesc);
+    return [...this.memories.values()]
+      .filter((item) => item.personaId === personaId && !isRetiredAutomaticSummary(item))
+      .sort(byUpdatedDesc);
   }
-  async putMemory(value: MemoryEntry): Promise<void> { this.memories.set(value.id, structuredClone(value)); }
+  async putMemory(value: MemoryEntry): Promise<void> {
+    if (isRetiredAutomaticSummary(value)) {
+      console.info("[SAIVerse Lite][memory] ignored retired automatic summary", { memoryId: value.id });
+      return;
+    }
+    this.memories.set(value.id, structuredClone(value));
+  }
   async deleteMemory(id: string): Promise<void> { this.memories.delete(id); }
 
   async listProviders(): Promise<ProviderConfig[]> { return [...this.providers.values()].sort((a, b) => a.label.localeCompare(b.label)); }
@@ -89,8 +99,8 @@ export class MemoryRepository implements LiteRepository {
   async putProvider(value: ProviderConfig): Promise<void> { this.providers.set(value.id, structuredClone(value)); }
   async deleteProvider(id: string): Promise<void> { if (id !== "provider_mock") this.providers.delete(id); }
 
-  async getSettings(): Promise<AppSettings> { return { ...structuredClone(DEFAULT_SETTINGS), ...structuredClone(this.settings), id: "app" }; }
-  async putSettings(value: AppSettings): Promise<void> { this.settings = structuredClone(value); }
+  async getSettings(): Promise<AppSettings> { return normalizeSettings(structuredClone(this.settings)); }
+  async putSettings(value: AppSettings): Promise<void> { this.settings = normalizeSettings(structuredClone(value)); }
 
   async exportSnapshot(includeSecrets = false): Promise<RepositorySnapshot> {
     const providers = (await this.listProviders()).map((provider) => ({
@@ -101,7 +111,7 @@ export class MemoryRepository implements LiteRepository {
       personas: await this.listPersonas(),
       threads: [...this.threads.values()].sort(byUpdatedDesc),
       messages: [...this.messages.values()].sort((a, b) => a.createdAt - b.createdAt),
-      memories: [...this.memories.values()].sort(byUpdatedDesc),
+      memories: [...this.memories.values()].filter((memory) => !isRetiredAutomaticSummary(memory)).sort(byUpdatedDesc),
       providers,
       settings: await this.getSettings(),
     };
@@ -111,8 +121,10 @@ export class MemoryRepository implements LiteRepository {
     this.personas = new Map(snapshot.personas.map((item) => [item.id, structuredClone(item)]));
     this.threads = new Map(snapshot.threads.map((item) => [item.id, structuredClone(item)]));
     this.messages = new Map(snapshot.messages.map((item) => [item.id, structuredClone(item)]));
-    this.memories = new Map(snapshot.memories.map((item) => [item.id, structuredClone(item)]));
+    this.memories = new Map(snapshot.memories
+      .filter((item) => !isRetiredAutomaticSummary(item))
+      .map((item) => [item.id, structuredClone(item)]));
     this.providers = new Map(snapshot.providers.map((item) => [item.id, structuredClone(item)]));
-    this.settings = structuredClone(snapshot.settings);
+    this.settings = normalizeSettings(snapshot.settings);
   }
 }

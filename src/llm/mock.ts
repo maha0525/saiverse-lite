@@ -22,9 +22,7 @@ export class MockProvider implements LlmProvider {
     }
     const response = toolResult
       ? `記憶を確認したよ。${toolResult.content}`
-      : request.toolChoice === "none"
-        ? `要約: ${last?.content.slice(0, 300) ?? "会話はまだありません。"}`
-        : `モック応答: ${last?.content ?? "こんにちは"}`;
+      : `モック応答: ${last?.content ?? "こんにちは"}`;
     for (const chunk of response.match(/.{1,8}/gs) ?? [response]) {
       await Promise.resolve();
       yield { type: "text", text: chunk };

@@ -40,8 +40,8 @@ const memory: MemoryEntry = {
   id: "memory_one",
   personaId: persona.id,
   threadId: thread.id,
-  kind: "summary",
-  content: "ユーザーは覚えていることを大切にしている。",
+  kind: "note",
+  content: "猫の名前はミケ。",
   sourceMessageIds: messages.map((message) => message.id),
   createdAt: 1_700_000_003_000,
   updatedAt: 1_700_000_003_000,
@@ -57,7 +57,15 @@ describe("SAIVerse native memory format", () => {
     expect(restored.messages.map((message) => ({ id: message.id, role: message.role, content: message.content }))).toEqual(
       messages.map((message) => ({ id: message.id, role: message.role, content: message.content })),
     );
-    expect(restored.memories[0]).toMatchObject({ id: memory.id, kind: "summary", content: memory.content });
+    expect(restored.memories[0]).toMatchObject({ id: memory.id, kind: "note", content: memory.content });
+  });
+
+  it("does not revive automatic summaries from older native exports", () => {
+    const exported = exportSaiverseMemory(persona, [thread], messages, [memory], 1_700_000_004_000);
+    const memoryThread = exported.threads.find((item) => item.thread_id.endsWith(":lite-memory"));
+    if (!memoryThread?.messages[0]) throw new Error("memory fixture was not exported");
+    memoryThread.messages[0].metadata.tags = ["memory", "summary", "saiverse_lite"];
+    expect(importSaiverseMemory(exported, persona.id).memories).toEqual([]);
   });
 });
 
@@ -89,14 +97,19 @@ describe("full backup", () => {
     expect(restored.providers[0]?.apiKey).toBe("");
   });
 
-  it("fills user profile defaults when restoring an older backup", () => {
+  it("drops retired summaries and legacy summary settings from older backups", () => {
     const oldBackup = {
       format: "saiverse_lite_backup_v1",
       data: {
-        personas: [], threads: [], messages: [], memories: [], providers: [],
-        settings: { id: "app", theme: "system", summaryEveryMessages: 12, recentContextMessages: 24, storagePersisted: null },
+        personas: [], threads: [], messages: [], providers: [],
+        memories: [{ ...memory, id: "retired_summary", kind: "summary" }, memory],
+        settings: { id: "app", theme: "system", autoSummaryEnabled: true, summaryEveryMessages: 12, recentContextMessages: 24, storagePersisted: null },
       },
     };
-    expect(parseFullBackup(oldBackup).settings).toMatchObject({ userName: "", userAvatarDataUrl: null, autoSummaryEnabled: false });
+    const restored = parseFullBackup(oldBackup);
+    expect(restored.settings).toMatchObject({ userName: "", userAvatarDataUrl: null, recentContextMessages: 24 });
+    expect(restored.settings).not.toHaveProperty("autoSummaryEnabled");
+    expect(restored.settings).not.toHaveProperty("summaryEveryMessages");
+    expect(restored.memories).toEqual([memory]);
   });
 });

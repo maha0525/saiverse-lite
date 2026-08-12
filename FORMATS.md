@@ -87,10 +87,10 @@ reasoning text. OpenAI Responses is called with `store: false`; Lite therefore k
 the returned opaque output items on-device and replays them when a function call
 continues. Importers must preserve this metadata field but should not interpret it.
 
-Long-term memories are exported as messages in the synthetic thread
+User-authored and imported memory notes are exported as messages in the synthetic thread
 `<persona-id>:lite-memory`. Their metadata contains:
 
-- tags `memory`, `summary` or `note`, and `saiverse_lite`
+- tags `memory`, `note`, and `saiverse_lite`
 - `lite_memory_id`
 - `lite_thread_id` (nullable for persona-wide notes)
 - `source_message_ids`
@@ -123,21 +123,20 @@ Provider records are included so models and compatible URLs survive migration, b
 `apiKey` is replaced with an empty string. Keys must be entered again on the destination
 device. Restore replaces the entire local database after explicit confirmation.
 
-## 4. Automatic summary pipeline
+## 4. Retired automatic summaries
 
-The pipeline is deterministic:
-
-1. After an assistant turn is committed, count user and assistant messages newer than
-   the latest summary's `sourceMessageIds`.
-2. If `settings.autoSummaryEnabled` is `true`, trigger when that count reaches `settings.summaryEveryMessages` (default 12). Automatic summaries are disabled by default.
-3. Ask the active provider for a concise factual summary with tools disabled.
-4. Store one `MemoryEntry(kind="summary")` with every covered message ID.
+Lite-specific automatic summaries were retired before the official release in favor of
+future SAIVerse Chronicle / Memopedia compatibility. On startup, stored
+`MemoryEntry(kind="summary")` rows are deleted. Restore and native import also discard
+legacy summary rows so an older backup cannot reintroduce them. The legacy settings
+`autoSummaryEnabled` and `summaryEveryMessages` are ignored and removed when settings
+are saved again.
 
 Prompt assembly order is fixed:
 
 1. persona system prompt (**fixed head**)
 2. persona tool definitions (**fixed for the persona**)
-3. injected memory block (summaries and user notes, deterministic newest-first budget)
+3. injected memory block (user-authored and imported notes, deterministic newest-first budget)
 4. recent conversation window (`recentContextMessages`, default 24)
 5. current user input / tool result
 

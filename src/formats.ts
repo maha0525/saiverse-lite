@@ -1,5 +1,6 @@
 import {
-  DEFAULT_SETTINGS,
+  isRetiredAutomaticSummary,
+  normalizeSettings,
   type ChatMessage,
   type ConversationThread,
   type MemoryEntry,
@@ -137,7 +138,7 @@ function exportMemoryThread(persona: Persona, memories: MemoryEntry[]): NativeTh
       resource_id: persona.id,
       created_at: epochSeconds(memory.createdAt),
       metadata: {
-        tags: ["memory", memory.kind, "saiverse_lite"],
+        tags: ["memory", "note", "saiverse_lite"],
         lite_memory_id: memory.id,
         lite_thread_id: memory.threadId,
         source_message_ids: memory.sourceMessageIds,
@@ -179,7 +180,9 @@ export function exportFullBackup(snapshot: RepositorySnapshot, now = Date.now())
     includes_api_keys: false,
     data: {
       ...structuredClone(snapshot),
+      memories: snapshot.memories.filter((memory) => !isRetiredAutomaticSummary(memory)),
       providers: snapshot.providers.map((provider) => ({ ...provider, apiKey: "" })),
+      settings: normalizeSettings(snapshot.settings),
     },
   };
 }
@@ -198,14 +201,13 @@ export function parseFullBackup(value: unknown): RepositorySnapshot {
     throw new Error(`Unsupported backup format (expected ${BACKUP_FORMAT})`);
   }
   const data = value.data;
-  const settings = isRecord(data.settings)
-    ? { ...DEFAULT_SETTINGS, ...data.settings, id: "app" as const }
-    : { ...DEFAULT_SETTINGS };
+  const settings = normalizeSettings(data.settings);
   return {
     personas: requireArray(data.personas, "data.personas") as Persona[],
     threads: requireArray(data.threads, "data.threads") as ConversationThread[],
     messages: requireArray(data.messages, "data.messages") as ChatMessage[],
-    memories: requireArray(data.memories, "data.memories") as MemoryEntry[],
+    memories: requireArray(data.memories, "data.memories")
+      .filter((memory) => !isRetiredAutomaticSummary(memory)) as MemoryEntry[],
     providers: requireArray(data.providers, "data.providers").map((item) => ({ ...(item as object), apiKey: "" })) as RepositorySnapshot["providers"],
     settings,
   };
@@ -232,6 +234,7 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
   const threads: ConversationThread[] = [];
   const messages: ChatMessage[] = [];
   const memories: MemoryEntry[] = [];
+  let retiredAutomaticSummaries = 0;
 
   for (const rawThread of rawThreads) {
     if (!isRecord(rawThread) || typeof rawThread.thread_id !== "string") throw new Error("thread_id is required");
@@ -241,6 +244,10 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
       for (const rawMessage of rawMessages) {
         if (!isRecord(rawMessage)) continue;
         const metadata = metadataOf(rawMessage.metadata);
+        if (Array.isArray(metadata.tags) && metadata.tags.includes("summary")) {
+          retiredAutomaticSummaries += 1;
+          continue;
+        }
         const id = stringOrNull(metadata.lite_memory_id) ?? stringOrNull(rawMessage.id) ?? `memory_${crypto.randomUUID()}`;
         const createdAt = fromEpoch(rawMessage.created_at);
         const updatedAt = typeof metadata.updated_at === "string" ? Date.parse(metadata.updated_at) : createdAt;
@@ -248,7 +255,7 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
           id,
           personaId: targetPersonaId,
           threadId: stringOrNull(metadata.lite_thread_id),
-          kind: Array.isArray(metadata.tags) && metadata.tags.includes("summary") ? "summary" : "note",
+          kind: "note",
           content: typeof rawMessage.content === "string" ? rawMessage.content : "",
           sourceMessageIds: Array.isArray(metadata.source_message_ids)
             ? metadata.source_message_ids.filter((item): item is string => typeof item === "string")
@@ -295,6 +302,9 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
         metadata,
       });
     }
+  }
+  if (retiredAutomaticSummaries > 0) {
+    console.info("[SAIVerse Lite][import] retired automatic summaries skipped", { count: retiredAutomaticSummaries });
   }
   return { threads, messages, memories };
 }

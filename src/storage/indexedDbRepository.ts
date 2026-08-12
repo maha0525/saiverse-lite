@@ -1,8 +1,9 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import {
-  DEFAULT_SETTINGS,
   createDefaultPersona,
   createDefaultProvider,
+  isRetiredAutomaticSummary,
+  normalizeSettings,
   type AppSettings,
   type ChatMessage,
   type ConversationThread,
@@ -56,12 +57,20 @@ export class IndexedDbRepository implements LiteRepository {
 
   async initialize(): Promise<void> {
     const db = await this.database();
-    const tx = db.transaction(["personas", "providers", "settings"], "readwrite");
+    const tx = db.transaction(["personas", "providers", "settings", "memories"], "readwrite");
+    const memoryStore = tx.objectStore("memories");
+    const retiredSummaries = (await memoryStore.getAll()).filter(isRetiredAutomaticSummary);
+    for (const memory of retiredSummaries) await memoryStore.delete(memory.id);
     if ((await tx.objectStore("providers").count()) === 0) await tx.objectStore("providers").put(createDefaultProvider());
     if ((await tx.objectStore("personas").count()) === 0) await tx.objectStore("personas").put(createDefaultPersona());
-    if (!(await tx.objectStore("settings").get("app"))) await tx.objectStore("settings").put({ ...DEFAULT_SETTINGS });
+    const storedSettings = await tx.objectStore("settings").get("app");
+    await tx.objectStore("settings").put(normalizeSettings(storedSettings));
     await tx.done;
-    console.log("[SAIVerse Lite][storage] IndexedDB initialized", { name: DB_NAME, version: DB_VERSION });
+    console.log("[SAIVerse Lite][storage] IndexedDB initialized", {
+      name: DB_NAME,
+      version: DB_VERSION,
+      retiredAutomaticSummaries: retiredSummaries.length,
+    });
   }
 
   async listPersonas(): Promise<Persona[]> { return (await (await this.database()).getAll("personas")).sort(byUpdatedDesc); }
@@ -111,19 +120,23 @@ export class IndexedDbRepository implements LiteRepository {
   async putMessage(value: ChatMessage): Promise<void> { await (await this.database()).put("messages", value); }
   async deleteMessage(id: string): Promise<void> {
     const db = await this.database();
-    const [message, memories] = await Promise.all([db.get("messages", id), db.getAll("memories")]);
-    const summaries = memories.filter((memory) => memory.kind === "summary" && memory.sourceMessageIds.includes(id));
-    const tx = db.transaction(["messages", "memories"], "readwrite");
-    await tx.objectStore("messages").delete(id);
-    for (const summary of summaries) await tx.objectStore("memories").delete(summary.id);
-    await tx.done;
-    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted: Boolean(message), deletedSummaries: summaries.length });
+    const message = await db.get("messages", id);
+    await db.delete("messages", id);
+    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted: Boolean(message) });
   }
 
   async listMemories(personaId: string): Promise<MemoryEntry[]> {
-    return (await (await this.database()).getAllFromIndex("memories", "by-persona", personaId)).sort(byUpdatedDesc);
+    return (await (await this.database()).getAllFromIndex("memories", "by-persona", personaId))
+      .filter((memory) => !isRetiredAutomaticSummary(memory))
+      .sort(byUpdatedDesc);
   }
-  async putMemory(value: MemoryEntry): Promise<void> { await (await this.database()).put("memories", value); }
+  async putMemory(value: MemoryEntry): Promise<void> {
+    if (isRetiredAutomaticSummary(value)) {
+      console.info("[SAIVerse Lite][memory] ignored retired automatic summary", { memoryId: value.id });
+      return;
+    }
+    await (await this.database()).put("memories", value);
+  }
   async deleteMemory(id: string): Promise<void> { await (await this.database()).delete("memories", id); }
 
   async listProviders(): Promise<ProviderConfig[]> { return (await (await this.database()).getAll("providers")).sort((a, b) => a.label.localeCompare(b.label)); }
@@ -133,9 +146,9 @@ export class IndexedDbRepository implements LiteRepository {
 
   async getSettings(): Promise<AppSettings> {
     const stored = await (await this.database()).get("settings", "app");
-    return stored ? { ...DEFAULT_SETTINGS, ...stored, id: "app" } : { ...DEFAULT_SETTINGS };
+    return normalizeSettings(stored);
   }
-  async putSettings(value: AppSettings): Promise<void> { await (await this.database()).put("settings", value); }
+  async putSettings(value: AppSettings): Promise<void> { await (await this.database()).put("settings", normalizeSettings(value)); }
 
   async exportSnapshot(includeSecrets = false): Promise<RepositorySnapshot> {
     const db = await this.database();
@@ -143,7 +156,7 @@ export class IndexedDbRepository implements LiteRepository {
       db.getAll("personas"), db.getAll("threads"), db.getAll("messages"), db.getAll("memories"), db.getAll("providers"), this.getSettings(),
     ]);
     const providers = rawProviders.map((provider) => ({ ...provider, apiKey: includeSecrets ? provider.apiKey : "" }));
-    return { personas, threads, messages, memories, providers, settings };
+    return { personas, threads, messages, memories: memories.filter((memory) => !isRetiredAutomaticSummary(memory)), providers, settings };
   }
 
   async replaceSnapshot(snapshot: RepositorySnapshot): Promise<void> {
@@ -154,15 +167,17 @@ export class IndexedDbRepository implements LiteRepository {
     for (const item of snapshot.personas) await tx.objectStore("personas").put(item);
     for (const item of snapshot.threads) await tx.objectStore("threads").put(item);
     for (const item of snapshot.messages) await tx.objectStore("messages").put(item);
-    for (const item of snapshot.memories) await tx.objectStore("memories").put(item);
+    const memories = snapshot.memories.filter((memory) => !isRetiredAutomaticSummary(memory));
+    for (const item of memories) await tx.objectStore("memories").put(item);
     for (const item of snapshot.providers) await tx.objectStore("providers").put(item);
-    await tx.objectStore("settings").put(snapshot.settings);
+    await tx.objectStore("settings").put(normalizeSettings(snapshot.settings));
     await tx.done;
     console.log("[SAIVerse Lite][storage] backup restored", {
       personas: snapshot.personas.length,
       threads: snapshot.threads.length,
       messages: snapshot.messages.length,
-      memories: snapshot.memories.length,
+      memories: memories.length,
+      retiredAutomaticSummaries: snapshot.memories.length - memories.length,
     });
   }
 }

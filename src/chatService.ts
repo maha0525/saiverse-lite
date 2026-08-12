@@ -11,7 +11,7 @@ import {
 import { ChatOperationError, type ChatOperation } from "./chatErrors";
 import { createProvider } from "./llm";
 import type { RetryAttempt, RetryNotice } from "./llm/retry";
-import type { LlmProvider, ProviderMessage } from "./llm/types";
+import type { ProviderMessage } from "./llm/types";
 import type { LiteRepository } from "./storage/repository";
 import { executeTool, toolDefinitionsFor } from "./tools";
 
@@ -295,71 +295,6 @@ export class ChatService {
     }
     if (!finalMessage) throw new Error("ツール呼び出しが上限を超えました");
     callbacks.onStatus?.("");
-    await this.maybeSummarize(persona, provider, threadId, definitions, signal);
     return finalMessage;
-  }
-
-  private async maybeSummarize(
-    persona: Persona,
-    provider: LlmProvider,
-    threadId: string,
-    definitions: ReturnType<typeof toolDefinitionsFor>,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const settings = await this.repository.getSettings();
-    if (!settings.autoSummaryEnabled) return;
-
-    const messages = (await this.repository.listMessages(threadId)).filter((message) =>
-      (message.role === "user" || message.role === "assistant") && toolCallsFromMetadata(message.metadata).length === 0,
-    );
-    const summaries = (await this.repository.listMemories(persona.id)).filter((memory) => memory.kind === "summary" && memory.threadId === threadId);
-    const latest = summaries[0];
-    let startIndex = 0;
-    if (latest) {
-      startIndex = Math.max(-1, ...latest.sourceMessageIds.map((id) => messages.findIndex((message) => message.id === id))) + 1;
-    }
-    const candidates = messages.slice(startIndex);
-    if (candidates.length < settings.summaryEveryMessages) return;
-    const userName = settings.userName.trim() || "ユーザー";
-    const transcript = candidates.map((message) => `${message.role === "user" ? userName : persona.name}: ${message.content}`).join("\n");
-    const providerConfig = provider.config;
-    let summary = "";
-    const promptMessage: ProviderMessage = {
-      role: "user",
-      content: `以下の会話から、今後の対話で役立つ事実・好み・約束・継続中の話題だけを日本語で簡潔に要約してください。推測を足さず、ツールは使わないでください。\n\n${transcript}`,
-      toolCallId: null,
-      toolName: null,
-      toolCalls: [],
-    };
-    try {
-      for await (const event of provider.stream({
-        model: persona.model || providerConfig.defaultModel,
-        systemPrompt: systemPromptWithUserIdentity(persona.systemPrompt, settings),
-        memoryContext: "",
-        messages: [promptMessage],
-        tools: definitions,
-        toolChoice: "none",
-        ...(signal ? { signal } : {}),
-      })) {
-        if (event.type === "text") summary += event.text;
-      }
-      if (!summary.trim()) return;
-      const now = Date.now();
-      const memory: MemoryEntry = {
-        id: newId("memory"),
-        personaId: persona.id,
-        threadId,
-        kind: "summary",
-        content: summary.trim(),
-        sourceMessageIds: candidates.map((message) => message.id),
-        createdAt: now,
-        updatedAt: now,
-      };
-      await this.repository.putMemory(memory);
-      console.log("[SAIVerse Lite][memory] automatic summary stored", { personaId: persona.id, threadId, sourceMessages: candidates.length });
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      console.warn("[SAIVerse Lite][memory] automatic summary failed; conversation remains saved", error);
-    }
   }
 }

@@ -20,6 +20,7 @@ export interface LiteRepository {
   getThread(id: string): Promise<ConversationThread | undefined>;
   putThread(value: ConversationThread): Promise<void>;
   deleteThread(id: string): Promise<void>;
+  deleteThreads(ids: string[]): Promise<void>;
 
   listMessages(threadId: string): Promise<ChatMessage[]>;
   putMessage(value: ChatMessage): Promise<void>;

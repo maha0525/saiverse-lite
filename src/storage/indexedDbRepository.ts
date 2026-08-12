@@ -70,7 +70,7 @@ export class IndexedDbRepository implements LiteRepository {
   async deletePersona(id: string): Promise<void> {
     const db = await this.database();
     const threads = await this.listThreads(id);
-    for (const thread of threads) await this.deleteThread(thread.id);
+    await this.deleteThreads(threads.map((thread) => thread.id));
     const memories = await this.listMemories(id);
     const tx = db.transaction(["personas", "memories"], "readwrite");
     await tx.objectStore("personas").delete(id);
@@ -83,13 +83,26 @@ export class IndexedDbRepository implements LiteRepository {
   }
   async getThread(id: string): Promise<ConversationThread | undefined> { return (await this.database()).get("threads", id); }
   async putThread(value: ConversationThread): Promise<void> { await (await this.database()).put("threads", value); }
-  async deleteThread(id: string): Promise<void> {
+  async deleteThread(id: string): Promise<void> { await this.deleteThreads([id]); }
+  async deleteThreads(ids: string[]): Promise<void> {
+    const requestedIds = new Set(ids);
+    if (requestedIds.size === 0) return;
     const db = await this.database();
-    const messages = await this.listMessages(id);
-    const tx = db.transaction(["threads", "messages"], "readwrite");
-    await tx.objectStore("threads").delete(id);
+    const [threads, allMessages, allMemories] = await Promise.all([
+      db.getAll("threads"),
+      db.getAll("messages"),
+      db.getAll("memories"),
+    ]);
+    const targetIds = new Set(threads.filter((thread) => requestedIds.has(thread.id)).map((thread) => thread.id));
+    if (targetIds.size === 0) return;
+    const messages = allMessages.filter((message) => targetIds.has(message.threadId));
+    const threadMemories = allMemories.filter((memory) => memory.threadId !== null && targetIds.has(memory.threadId));
+    const tx = db.transaction(["threads", "messages", "memories"], "readwrite");
+    for (const id of targetIds) await tx.objectStore("threads").delete(id);
     for (const message of messages) await tx.objectStore("messages").delete(message.id);
+    for (const memory of threadMemories) await tx.objectStore("memories").delete(memory.id);
     await tx.done;
+    console.info("[SAIVerse Lite][storage] Threads deleted", { deletedThreads: targetIds.size, deletedMessages: messages.length, deletedMemories: threadMemories.length });
   }
 
   async listMessages(threadId: string): Promise<ChatMessage[]> {

@@ -307,6 +307,8 @@ export class ChatService {
     signal?: AbortSignal,
   ): Promise<void> {
     const settings = await this.repository.getSettings();
+    if (!settings.autoSummaryEnabled) return;
+
     const messages = (await this.repository.listMessages(threadId)).filter((message) =>
       (message.role === "user" || message.role === "assistant") && toolCallsFromMetadata(message.metadata).length === 0,
     );

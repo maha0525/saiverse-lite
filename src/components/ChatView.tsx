@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import type { ChatStatusTone } from "../chatService";
 import type { AppSettings, ChatMessage, ConversationThread, Persona } from "../domain";
 import { loadDraft, saveDraft } from "../onboarding";
+import { ThreadManagerDialog } from "./ThreadManagerDialog";
 
 interface ChatViewProps {
   persona: Persona;
@@ -15,7 +16,7 @@ interface ChatViewProps {
   sending: boolean;
   onSelectThread(id: string): void;
   onCreateThread(): void;
-  onDeleteThread(id: string): void;
+  onDeleteThreads(ids: string[]): Promise<boolean>;
   onSend(text: string): Promise<boolean>;
   onEdit(message: ChatMessage, content: string): Promise<void>;
   onRegenerate(): Promise<void>;
@@ -62,11 +63,13 @@ function MessageBubble({ message, persona, settings, onEdit }: { message: ChatMe
 
 export function ChatView(props: ChatViewProps) {
   const [draft, setDraft] = useState("");
+  const [threadManagerOpen, setThreadManagerOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeThreadRef = useRef(props.activeThreadId);
   activeThreadRef.current = props.activeThreadId;
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [props.messages, props.streamingText]);
+  useEffect(() => { setThreadManagerOpen(false); }, [props.persona.id]);
 
   // 打ちかけの言葉をスレッドごとに端末へ自動保存 (事故で閉じても消えない)
   useEffect(() => {
@@ -115,7 +118,7 @@ export function ChatView(props: ChatViewProps) {
             </select>
           </label>
           <button className="button secondary" onClick={props.onCreateThread}>新しい会話</button>
-          {props.activeThreadId && <button className="text-button danger" onClick={() => props.onDeleteThread(props.activeThreadId!)}>削除</button>}
+          <button className="text-button danger thread-manage-button" disabled={props.sending} onClick={() => setThreadManagerOpen(true)}>会話を整理</button>
         </div>
       </header>
       <div className="message-list" aria-live="polite">
@@ -158,6 +161,7 @@ export function ChatView(props: ChatViewProps) {
           <button className="send-button" disabled={!draft.trim() || props.sending || !props.activeThreadId} aria-label="送信">送る</button>
         </form>
       </footer>
+      {threadManagerOpen && <ThreadManagerDialog threads={props.threads} busy={props.sending} onClose={() => setThreadManagerOpen(false)} onDelete={props.onDeleteThreads} />}
     </section>
   );
 }

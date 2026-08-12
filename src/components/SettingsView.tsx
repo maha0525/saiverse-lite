@@ -99,7 +99,11 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
           <label className="field"><span>あなたの名前</span><input value={localSettings.userName} onChange={(event) => setLocalSettings({ ...localSettings, userName: event.target.value })} placeholder="未設定の場合は「あなた」と表示" /></label>
           <label className="field"><span>テーマ</span><select value={localSettings.theme} onChange={(event) => setLocalSettings({ ...localSettings, theme: event.target.value as AppSettings["theme"] })}><option value="system">端末に合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
-          <label className="field"><span>自動要約までの発言数</span><input type="number" min={4} max={100} value={localSettings.summaryEveryMessages} onChange={(event) => setLocalSettings({ ...localSettings, summaryEveryMessages: Number(event.target.value) })} /></label>
+          <label className="toggle">
+            <input type="checkbox" checked={localSettings.autoSummaryEnabled} onChange={(event) => setLocalSettings({ ...localSettings, autoSummaryEnabled: event.target.checked })} />
+            <span><strong>自動要約を新しく作る</strong><small>オンにすると、設定した発言数ごとに会話モデルへ別のAPI呼び出しを行い、Lite固有の要約記憶を作ります。オフにしても既存の要約は削除しません。</small></span>
+          </label>
+          <label className="field"><span>自動要約までの発言数</span><input type="number" min={4} max={100} disabled={!localSettings.autoSummaryEnabled} value={localSettings.summaryEveryMessages} onChange={(event) => setLocalSettings({ ...localSettings, summaryEveryMessages: Number(event.target.value) })} /></label>
           <label className="field"><span>会話へ入れる直近メッセージ数</span><input type="number" min={4} max={200} value={localSettings.recentContextMessages} onChange={(event) => setLocalSettings({ ...localSettings, recentContextMessages: Number(event.target.value) })} /></label>
           <p className="field-help">要約は固定されたシステムプロンプトの後、直近履歴の前に注入されます。ペルソナのツール定義は会話中に増減しません。</p>
           <button className="button" type="submit">アプリ設定を保存</button>

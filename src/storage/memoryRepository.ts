@@ -34,7 +34,7 @@ export class MemoryRepository implements LiteRepository {
   async putPersona(value: Persona): Promise<void> { this.personas.set(value.id, structuredClone(value)); }
   async deletePersona(id: string): Promise<void> {
     this.personas.delete(id);
-    for (const thread of [...this.threads.values()]) if (thread.personaId === id) await this.deleteThread(thread.id);
+    await this.deleteThreads([...this.threads.values()].filter((thread) => thread.personaId === id).map((thread) => thread.id));
     for (const memory of [...this.memories.values()]) if (memory.personaId === id) this.memories.delete(memory.id);
   }
 
@@ -43,9 +43,24 @@ export class MemoryRepository implements LiteRepository {
   }
   async getThread(id: string): Promise<ConversationThread | undefined> { return this.threads.get(id); }
   async putThread(value: ConversationThread): Promise<void> { this.threads.set(value.id, structuredClone(value)); }
-  async deleteThread(id: string): Promise<void> {
-    this.threads.delete(id);
-    for (const message of [...this.messages.values()]) if (message.threadId === id) this.messages.delete(message.id);
+  async deleteThread(id: string): Promise<void> { await this.deleteThreads([id]); }
+  async deleteThreads(ids: string[]): Promise<void> {
+    const targetIds = new Set(ids.filter((id) => this.threads.has(id)));
+    if (targetIds.size === 0) return;
+    for (const id of targetIds) this.threads.delete(id);
+    let deletedMessages = 0;
+    let deletedMemories = 0;
+    for (const message of [...this.messages.values()]) {
+      if (!targetIds.has(message.threadId)) continue;
+      this.messages.delete(message.id);
+      deletedMessages += 1;
+    }
+    for (const memory of [...this.memories.values()]) {
+      if (!memory.threadId || !targetIds.has(memory.threadId)) continue;
+      this.memories.delete(memory.id);
+      deletedMemories += 1;
+    }
+    console.info("[SAIVerse Lite][storage] Threads deleted", { deletedThreads: targetIds.size, deletedMessages, deletedMemories });
   }
 
   async listMessages(threadId: string): Promise<ChatMessage[]> {

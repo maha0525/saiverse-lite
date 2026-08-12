@@ -23,14 +23,33 @@ async function exercise(repository: LiteRepository): Promise<void> {
     id: newId("memory"), personaId: persona.id, threadId: thread.id, kind: "note", content: "remember",
     sourceMessageIds: [message.id], createdAt: now, updatedAt: now,
   };
+  const personaMemory: MemoryEntry = {
+    id: newId("memory"), personaId: persona.id, threadId: null, kind: "note", content: "keep across threads",
+    sourceMessageIds: [], createdAt: now, updatedAt: now,
+  };
+  const secondThread: ConversationThread = { ...thread, id: newId("thread"), title: "second" };
+  const secondMessage: ChatMessage = { ...message, id: newId("message"), threadId: secondThread.id, content: "second hello" };
+  const secondMemory: MemoryEntry = { ...memory, id: newId("memory"), threadId: secondThread.id, content: "second remember", sourceMessageIds: [secondMessage.id] };
   await repository.putThread(thread);
+  await repository.putThread(secondThread);
   await repository.putMessage(message);
+  await repository.putMessage(secondMessage);
   await repository.putMemory(memory);
+  await repository.putMemory(secondMemory);
+  await repository.putMemory(personaMemory);
   expect(await repository.listThreads(persona.id)).toContainEqual(thread);
   expect(await repository.listMessages(thread.id)).toContainEqual(message);
   expect(await repository.listMemories(persona.id)).toContainEqual(memory);
   const snapshot = await repository.exportSnapshot();
   expect(snapshot.providers.every((provider) => provider.apiKey === "")).toBe(true);
+  await repository.deleteThreads([thread.id, secondThread.id]);
+  expect(await repository.listThreads(persona.id)).not.toContainEqual(thread);
+  expect(await repository.listThreads(persona.id)).not.toContainEqual(secondThread);
+  expect(await repository.listMessages(thread.id)).toEqual([]);
+  expect(await repository.listMessages(secondThread.id)).toEqual([]);
+  expect(await repository.listMemories(persona.id)).not.toContainEqual(memory);
+  expect(await repository.listMemories(persona.id)).not.toContainEqual(secondMemory);
+  expect(await repository.listMemories(persona.id)).toContainEqual(personaMemory);
 }
 
 describe("storage abstraction", () => {

@@ -85,6 +85,7 @@ export interface AppSettings {
   theme: ThemeMode;
   userName: string;
   userAvatarDataUrl: string | null;
+  autoSummaryEnabled: boolean;
   summaryEveryMessages: number;
   recentContextMessages: number;
   storagePersisted: boolean | null;
@@ -107,6 +108,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   userName: "",
   userAvatarDataUrl: null,
+  autoSummaryEnabled: false,
   summaryEveryMessages: 12,
   recentContextMessages: 24,
   storagePersisted: null,

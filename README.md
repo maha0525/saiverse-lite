@@ -25,15 +25,15 @@ pnpm build
 
 `pnpm dev` が表示する URL をブラウザで開いてください。API キーとモデル名は
 「設定」で端末ごとに登録します。最初から入っている Mock プロバイダなら API キー
-なしで会話、記憶要約、ツール呼び出しを確認できます。
+なしで会話、任意で有効にした記憶要約、ツール呼び出しを確認できます。
 
 ## v1 の実装範囲
 
 - OpenAI、Anthropic、Gemini、OpenAI 互換 URL、Mock の BYOK プロバイダ
 - Gemini explicit cache の create → generate → delete と、短い入力・作成失敗時の通常呼び出し
 - 複数ペルソナ、固定 system prompt、ペルソナ単位の固定ツール登録
-- ストリーミング会話、複数スレッド、メッセージ編集、回答再生成
-- 履歴永続化、自動要約、記憶の閲覧・追加・編集・削除
+- ストリーミング会話、複数スレッド、選択式の会話一括削除、メッセージ編集、回答再生成
+- 履歴永続化、任意の自動要約（既定では無効）、記憶の閲覧・追加・編集・削除
 - ChatGPT 公式エクスポートの JSON / ZIP インポート
 - SAIVerse 本体互換の会話・記憶エクスポート、ペルソナエクスポート、フルバックアップと復元
 - ネイティブ function calling 基盤、記憶想起・画像生成ツール
@@ -59,7 +59,7 @@ Gemma 4 E2B / E4B を PWA 上でオンデバイス実行する調査結果と実
 - メモリ実装と fake IndexedDB の共通ストレージ契約
 - Lite バックアップ、および `saiverse_saimemory_v1` のラウンドトリップ
 - ChatGPT active branch / hidden message のパーサ規則
-- Mock 会話、自動要約、記憶想起ツール
+- Mock 会話、有効・無効それぞれの自動要約、記憶想起ツール
 - 通信モックによる OpenAI Responses API の推論状態を含む tool-call 連鎖、
   OpenAI 互換 Chat Completions、Anthropic 必須ヘッダと cache breakpoint、
   Gemini cache の作成・利用・削除

@@ -33,8 +33,9 @@ API キーは provider レコードに端末内保存しますが、`saiverse_li
 ### 固定 prefix と記憶注入
 
 system prompt と tool definitions はペルソナに保存し、ターンごとに変えません。動的な記憶
-ブロックは固定 head の後、直近会話の前に置きます。自動要約の閾値、対象 message ID、
-注入順は `FORMATS.md` に記載し、サービス実装とテストを一致させました。
+ブロックは固定 head の後、直近会話の前に置きます。自動要約は既定では無効で、設定から
+有効化した場合だけ閾値に従って生成します。対象 message ID と注入順は `FORMATS.md` に記載し、
+サービス実装とテストを一致させました。
 
 ### Gemini auto cache
 

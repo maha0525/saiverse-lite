@@ -129,7 +129,7 @@ The pipeline is deterministic:
 
 1. After an assistant turn is committed, count user and assistant messages newer than
    the latest summary's `sourceMessageIds`.
-2. Trigger when that count reaches `settings.summaryEveryMessages` (default 12).
+2. If `settings.autoSummaryEnabled` is `true`, trigger when that count reaches `settings.summaryEveryMessages` (default 12). Automatic summaries are disabled by default.
 3. Ask the active provider for a concise factual summary with tools disabled.
 4. Store one `MemoryEntry(kind="summary")` with every covered message ID.
 

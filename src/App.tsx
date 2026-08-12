@@ -23,7 +23,7 @@ import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMe
 import { importClaudeFile, saveImportedConversations, type ImportedConversation } from "./importers";
 import type { ConversationImportTarget } from "./components/OfficialImportDialog";
 import { LEGAL_VERSION } from "./legal";
-import { completeOnboarding, loadOnboarding, resetOnboarding } from "./onboarding";
+import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
@@ -194,10 +194,22 @@ export default function App() {
     await loadPersonaData(selectedPersona.id, thread.id);
   };
 
-  const deleteThread = async (id: string) => {
-    if (!selectedPersona || !window.confirm("このスレッドの会話を削除しますか？")) return;
-    await repository.deleteThread(id);
-    await loadPersonaData(selectedPersona.id);
+  const deleteThreads = async (ids: string[]): Promise<boolean> => {
+    if (!selectedPersona || sending) return false;
+    const requestedIds = new Set(ids);
+    const targets = threads.filter((thread) => requestedIds.has(thread.id));
+    if (targets.length === 0 || !window.confirm(`${targets.length}件の会話を削除しますか？\n選んだ会話の発言と、会話に紐づく記憶は元に戻せません。`)) return false;
+    try {
+      await repository.deleteThreads(targets.map((thread) => thread.id));
+      for (const target of targets) saveDraft(`composer.${target.id}`, "");
+      await loadPersonaData(selectedPersona.id);
+      setNotice(`${targets.length}件の会話を削除しました。`);
+      return true;
+    } catch (error) {
+      console.error("[SAIVerse Lite][storage] Failed to delete threads", { threadIds: targets.map((thread) => thread.id), error });
+      setNotice(`${targets.length}件の会話を削除できませんでした: ${errorMessage(error)}`);
+      return false;
+    }
   };
 
   const send = async (text: string): Promise<boolean> => {
@@ -328,7 +340,7 @@ export default function App() {
 
   const content = (() => {
     if (!selectedPersona) return <div className="empty-state"><h2>パートナーを読み込めませんでした</h2></div>;
-    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThread={(id) => void deleteThread(id)} onSend={send} onEdit={editMessage} onRegenerate={regenerate} />;
+    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onRegenerate={regenerate} />;
     if (view === "personas") return <PersonaView personas={personas} providers={providers} selectedId={selectedPersona.id} onSelect={(id) => void selectPersona(id)} onSave={savePersona} onDelete={deletePersona} />;
     if (view === "memory") return <MemoryView persona={selectedPersona} memories={memories} onCreate={createMemory} onEdit={editMemory} onDelete={deleteMemory} />;
     if (view === "data") return <DataView

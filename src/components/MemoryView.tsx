@@ -35,7 +35,7 @@ export function MemoryView({ persona, memories, onCreate, onEdit, onDelete }: Me
             </div>
           </article>
         ))}
-        {memories.length === 0 && <div className="empty-state compact-empty"><h2>まだ記憶はありません</h2><p>会話が続くと自動要約がここに積もります。</p></div>}
+        {memories.length === 0 && <div className="empty-state compact-empty"><h2>まだ記憶はありません</h2><p>手書きの記憶や、設定で有効にした自動要約がここに積もります。</p></div>}
       </div>
     </section>
   );

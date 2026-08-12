@@ -97,6 +97,6 @@ describe("full backup", () => {
         settings: { id: "app", theme: "system", summaryEveryMessages: 12, recentContextMessages: 24, storagePersisted: null },
       },
     };
-    expect(parseFullBackup(oldBackup).settings).toMatchObject({ userName: "", userAvatarDataUrl: null });
+    expect(parseFullBackup(oldBackup).settings).toMatchObject({ userName: "", userAvatarDataUrl: null, autoSummaryEnabled: false });
   });
 });

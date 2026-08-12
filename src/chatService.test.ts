@@ -13,7 +13,7 @@ describe("ChatService with mock provider", () => {
   it("streams, persists, and creates a deterministic automatic summary", async () => {
     const repository = new MemoryRepository();
     await repository.initialize();
-    await repository.putSettings({ ...DEFAULT_SETTINGS, summaryEveryMessages: 2 });
+    await repository.putSettings({ ...DEFAULT_SETTINGS, autoSummaryEnabled: true, summaryEveryMessages: 2 });
     const persona = createDefaultPersona();
     const now = Date.now();
     const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
@@ -23,6 +23,20 @@ describe("ChatService with mock provider", () => {
     expect(streamed).toContain("モック応答");
     expect(await repository.listMessages(thread.id)).toHaveLength(2);
     expect((await repository.listMemories(persona.id))[0]?.kind).toBe("summary");
+  });
+
+  it("does not create an automatic summary when the setting is disabled", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    await repository.putSettings({ ...DEFAULT_SETTINGS, autoSummaryEnabled: false, summaryEveryMessages: 2 });
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+
+    await new ChatService(repository).send(persona, thread, "こんにちは");
+
+    expect(await repository.listMemories(persona.id)).toEqual([]);
   });
 
   it("runs the registered memory recall tool and returns its result to the model", async () => {

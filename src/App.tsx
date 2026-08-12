@@ -20,7 +20,7 @@ import {
   type ProviderConfig,
 } from "./domain";
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
-import { importClaudeFile, saveImportedConversations, type ImportedConversation } from "./importers";
+import { saveClaudeMemories, saveImportedConversations, type ClaudeMemoryText, type ImportedConversation } from "./importers";
 import type { ConversationImportTarget } from "./components/OfficialImportDialog";
 import { LEGAL_VERSION } from "./legal";
 import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
@@ -267,6 +267,21 @@ export default function App() {
     await loadThread(message.threadId);
   };
 
+  const deleteMessage = async (message: ChatMessage) => {
+    if (sending) return;
+    const speaker = message.role === "user" ? settings.userName.trim() || "あなた" : selectedPersona?.name || "AI";
+    if (!window.confirm(`${speaker}のこの発言だけを削除しますか？\nこの操作は元に戻せません。`)) return;
+    try {
+      await repository.deleteMessage(message.id);
+      await loadThread(message.threadId);
+      if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
+      setNotice(`${speaker}の発言を削除しました。`);
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Failed to delete message", { messageId: message.id, error });
+      setNotice(`発言を削除できませんでした: ${errorMessage(error)}`);
+    }
+  };
+
   const regenerate = async () => {
     if (!selectedPersona || !activeThreadId || sending) return;
     setSending(true);
@@ -340,7 +355,7 @@ export default function App() {
 
   const content = (() => {
     if (!selectedPersona) return <div className="empty-state"><h2>パートナーを読み込めませんでした</h2></div>;
-    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onRegenerate={regenerate} />;
+    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onDeleteMessage={deleteMessage} onRegenerate={regenerate} />;
     if (view === "personas") return <PersonaView personas={personas} providers={providers} selectedId={selectedPersona.id} onSelect={(id) => void selectPersona(id)} onSave={savePersona} onDelete={deletePersona} />;
     if (view === "memory") return <MemoryView persona={selectedPersona} memories={memories} onCreate={createMemory} onEdit={editMemory} onDelete={deleteMemory} />;
     if (view === "data") return <DataView
@@ -350,10 +365,11 @@ export default function App() {
       onExportBackup={() => runDataAction(async () => { downloadJson("saiverse-lite-backup.json", exportFullBackup(await repository.exportSnapshot())); return "フルバックアップを書き出しました。"; })}
       onImportBackup={(file) => runDataAction(async () => { if (!window.confirm("現在の端末内データをバックアップ内容で置き換えますか？")) return "復元をキャンセルしました。"; await repository.replaceSnapshot(parseFullBackup(JSON.parse(await file.text()))); await refreshBase(); return "バックアップを復元しました。APIキーは再入力してください。"; })}
       onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); for (const thread of imported.threads) await repository.putThread(thread); for (const message of imported.messages) await repository.putMessage(message); for (const memory of imported.memories) await repository.putMemory(memory); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
-      onImportChatGpt={async (target: ConversationImportTarget, conversations: ImportedConversation[]) => {
+      onImportOfficial={async (target: ConversationImportTarget, conversations: ImportedConversation[], memories: ClaudeMemoryText[]) => {
         setDataBusy(true);
         setNotice("");
         let createdPersonaId: string | null = null;
+        const sourceName = conversations[0]?.source === "claude" ? "Claude" : "ChatGPT";
         try {
           let targetPersona: Persona | undefined;
           if (target.kind === "existing") {
@@ -371,14 +387,16 @@ export default function App() {
             };
             await repository.putPersona(targetPersona);
             createdPersonaId = targetPersona.id;
-            console.log("[SAIVerse Lite][import] new persona created for ChatGPT import", { personaId: targetPersona.id, conversations: conversations.length });
+            console.log("[SAIVerse Lite][import] new persona created for official import", { source: sourceName, personaId: targetPersona.id, conversations: conversations.length });
           }
           const result = await saveImportedConversations(repository, targetPersona, conversations);
+          const memoryCount = memories.length ? await saveClaudeMemories(repository, targetPersona, memories) : 0;
           await refreshBase(targetPersona.id);
-          setNotice(`${targetPersona.name}へ${result.threads}会話、${result.messages}発言を取り込みました。`);
+          const memoryNote = memoryCount ? `、Claude の記憶 ${memoryCount}件` : "";
+          setNotice(`${targetPersona.name}へ${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`);
           return true;
         } catch (error) {
-          console.error("[SAIVerse Lite][import] selected ChatGPT import failed", error);
+          console.error("[SAIVerse Lite][import] selected official import failed", { source: sourceName, error });
           if (createdPersonaId) {
             try {
               await repository.deletePersona(createdPersonaId);
@@ -387,18 +405,12 @@ export default function App() {
               console.error("[SAIVerse Lite][import] failed to roll back new persona", { personaId: createdPersonaId, rollbackError });
             }
           }
-          setNotice(`ChatGPT の会話を取り込めませんでした: ${errorMessage(error)}`);
+          setNotice(`${sourceName} の会話を取り込めませんでした: ${errorMessage(error)}`);
           return false;
         } finally {
           setDataBusy(false);
         }
       }}
-      onImportClaude={(file) => runDataAction(async () => {
-        const result = await importClaudeFile(repository, selectedPersona, file);
-        await loadPersonaData(selectedPersona.id);
-        const memoryNote = result.memories ? `、Claude の記憶 ${result.memories} 件` : "";
-        return `${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`;
-      })}
     />;
     return <SettingsView providers={providers} settings={settings} canInstall={installPrompt !== null} onRestartOnboarding={() => { resetOnboarding(); setWizard("full"); }} onInstall={async () => { if (!installPrompt) return; await installPrompt.prompt(); const choice = await installPrompt.userChoice; if (choice.outcome === "accepted") setInstallPrompt(null); }} onSaveProvider={async (provider) => { await repository.putProvider(provider); setProviders(await repository.listProviders()); }} onDeleteProvider={async (id) => {
       const users = personas.filter((persona) => persona.providerId === id);

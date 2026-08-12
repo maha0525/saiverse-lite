@@ -109,7 +109,16 @@ export class IndexedDbRepository implements LiteRepository {
     return (await (await this.database()).getAllFromIndex("messages", "by-thread", threadId)).sort((a, b) => a.createdAt - b.createdAt);
   }
   async putMessage(value: ChatMessage): Promise<void> { await (await this.database()).put("messages", value); }
-  async deleteMessage(id: string): Promise<void> { await (await this.database()).delete("messages", id); }
+  async deleteMessage(id: string): Promise<void> {
+    const db = await this.database();
+    const [message, memories] = await Promise.all([db.get("messages", id), db.getAll("memories")]);
+    const summaries = memories.filter((memory) => memory.kind === "summary" && memory.sourceMessageIds.includes(id));
+    const tx = db.transaction(["messages", "memories"], "readwrite");
+    await tx.objectStore("messages").delete(id);
+    for (const summary of summaries) await tx.objectStore("memories").delete(summary.id);
+    await tx.done;
+    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted: Boolean(message), deletedSummaries: summaries.length });
+  }
 
   async listMemories(personaId: string): Promise<MemoryEntry[]> {
     return (await (await this.database()).getAllFromIndex("memories", "by-persona", personaId)).sort(byUpdatedDesc);

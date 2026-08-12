@@ -67,7 +67,16 @@ export class MemoryRepository implements LiteRepository {
     return [...this.messages.values()].filter((item) => item.threadId === threadId).sort((a, b) => a.createdAt - b.createdAt);
   }
   async putMessage(value: ChatMessage): Promise<void> { this.messages.set(value.id, structuredClone(value)); }
-  async deleteMessage(id: string): Promise<void> { this.messages.delete(id); }
+  async deleteMessage(id: string): Promise<void> {
+    const deleted = this.messages.delete(id);
+    let deletedSummaries = 0;
+    for (const memory of [...this.memories.values()]) {
+      if (memory.kind !== "summary" || !memory.sourceMessageIds.includes(id)) continue;
+      this.memories.delete(memory.id);
+      deletedSummaries += 1;
+    }
+    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted, deletedSummaries });
+  }
 
   async listMemories(personaId: string): Promise<MemoryEntry[]> {
     return [...this.memories.values()].filter((item) => item.personaId === personaId).sort(byUpdatedDesc);

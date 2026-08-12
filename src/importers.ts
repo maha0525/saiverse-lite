@@ -283,10 +283,22 @@ export async function importClaudeFile(repository: LiteRepository, persona: Pers
   const conversations = await new ClaudeExportAdapter().parse(file);
   const result = await saveImportedConversations(repository, persona, conversations);
   const memoryTexts = await extractClaudeMemories(file);
+  const memories = await saveClaudeMemories(repository, persona, memoryTexts);
+  return { ...result, memories };
+}
+
+export async function saveClaudeMemories(
+  repository: LiteRepository,
+  persona: Persona,
+  memoryTexts: ClaudeMemoryText[],
+): Promise<number> {
+  const existingIds = new Set((await repository.listMemories(persona.id)).map((memory) => memory.id));
+  const safePersonaId = persona.id.replace(/[^a-zA-Z0-9_-]/g, "_");
   const now = Date.now();
   for (const memory of memoryTexts) {
+    const id = existingIds.has(memory.id) ? memory.id : `${memory.id}_${safePersonaId}`;
     await repository.putMemory({
-      id: memory.id,
+      id,
       personaId: persona.id,
       threadId: null,
       kind: "note",
@@ -296,7 +308,8 @@ export async function importClaudeFile(repository: LiteRepository, persona: Pers
       updatedAt: now,
     });
   }
-  return { ...result, memories: memoryTexts.length };
+  console.info("[SAIVerse Lite][import] Claude memories stored", { personaId: persona.id, memories: memoryTexts.length });
+  return memoryTexts.length;
 }
 
 export async function saveImportedConversations(

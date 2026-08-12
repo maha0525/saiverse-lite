@@ -19,6 +19,7 @@ interface ChatViewProps {
   onDeleteThreads(ids: string[]): Promise<boolean>;
   onSend(text: string): Promise<boolean>;
   onEdit(message: ChatMessage, content: string): Promise<void>;
+  onDeleteMessage(message: ChatMessage): Promise<void>;
   onRegenerate(): Promise<void>;
 }
 
@@ -26,7 +27,7 @@ function time(value: number): string {
   return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(value);
 }
 
-function MessageBubble({ message, persona, settings, onEdit }: { message: ChatMessage; persona: Persona; settings: AppSettings; onEdit(message: ChatMessage, content: string): Promise<void> }) {
+function MessageBubble({ message, persona, settings, disabled, onEdit, onDelete }: { message: ChatMessage; persona: Persona; settings: AppSettings; disabled: boolean; onEdit(message: ChatMessage, content: string): Promise<void>; onDelete(message: ChatMessage): Promise<void> }) {
   const imageDataUrl = typeof message.metadata.imageDataUrl === "string" ? message.metadata.imageDataUrl : null;
   if (message.role === "tool") {
     return (
@@ -55,7 +56,10 @@ function MessageBubble({ message, persona, settings, onEdit }: { message: ChatMe
       <div className="message-body">
         <div className="message-meta"><strong>{label}</strong><time>{time(message.createdAt)}</time>{message.editedAt && <span>編集済み</span>}</div>
         <div className="message-content">{message.content || <span className="muted">ツールを使っています…</span>}</div>
-        <button className="text-button compact" onClick={edit}>編集</button>
+        <div className="message-actions">
+          <button className="text-button compact" onClick={edit} disabled={disabled}>編集</button>
+          <button className="text-button compact danger" onClick={() => void onDelete(message)} disabled={disabled}>削除</button>
+        </div>
       </div>
     </article>
   );
@@ -125,7 +129,7 @@ export function ChatView(props: ChatViewProps) {
         {props.messages.length === 0 && !props.streamingText && (
           <div className="empty-state"><span>ここから始まる</span><h2>{props.persona.name}との新しい時間</h2><p>会話も記憶も、この端末の中に保存されます。</p></div>
         )}
-        {props.messages.map((message) => <MessageBubble key={message.id} message={message} persona={props.persona} settings={props.settings} onEdit={props.onEdit} />)}
+        {props.messages.map((message) => <MessageBubble key={message.id} message={message} persona={props.persona} settings={props.settings} disabled={props.sending} onEdit={props.onEdit} onDelete={props.onDeleteMessage} />)}
         {props.streamingText && (
           <article className="message-row assistant streaming">
             <div className="message-avatar" aria-hidden="true">{props.persona.avatarDataUrl ? <img src={props.persona.avatarDataUrl} alt="" /> : props.persona.name.slice(0, 1)}</div>

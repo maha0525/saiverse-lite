@@ -32,9 +32,9 @@ pnpm build
 - OpenAI、Anthropic、Gemini、OpenAI 互換 URL、Mock の BYOK プロバイダ
 - Gemini explicit cache の create → generate → delete と、短い入力・作成失敗時の通常呼び出し
 - 複数ペルソナ、固定 system prompt、ペルソナ単位の固定ツール登録
-- ストリーミング会話、複数スレッド、選択式の会話一括削除、メッセージ編集、回答再生成
+- ストリーミング会話、複数スレッド、選択式の会話一括削除、ユーザー・AI発言の編集と削除、回答再生成
 - 履歴永続化、任意の自動要約（既定では無効）、記憶の閲覧・追加・編集・削除
-- ChatGPT 公式エクスポートの JSON / ZIP インポート
+- ChatGPT / Claude 公式エクスポートの JSON / ZIP インポート（会話・取り込み先ペルソナを選択可能）
 - SAIVerse 本体互換の会話・記憶エクスポート、ペルソナエクスポート、フルバックアップと復元
 - ネイティブ function calling 基盤、記憶想起・画像生成ツール
 - 日本語 UI、ライト / ダークテーマ、manifest、service worker、インストール導線

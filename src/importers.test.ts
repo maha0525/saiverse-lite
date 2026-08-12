@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { newId, type ConversationThread, type Persona } from "./domain";
-import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, saveImportedConversations } from "./importers";
+import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, saveClaudeMemories, saveImportedConversations } from "./importers";
 import { MemoryRepository } from "./storage/memoryRepository";
 
 // 実データ (2026-07-15 検証) と同形の匿名フィクスチャ。値はすべて合成。
@@ -93,6 +93,23 @@ describe("official export adapters", () => {
       "memory_import_claude_proj_01999a51-fe7b-761a-a011-241a73173a77",
     ]);
     expect(memories[0]?.text).toBe("ユーザーは猫を飼っている。");
+  });
+
+  it("stores the same Claude memories for different personas without ID collisions", async () => {
+    const repository = new MemoryRepository();
+    const first = { ...testPersona(), id: "persona_first_memory" };
+    const second = { ...testPersona(), id: "persona_second_memory" };
+    const file = new File([JSON.stringify(CLAUDE_MEMORIES)], "memories.json", { type: "application/json" });
+    const memories = await extractClaudeMemories(file);
+
+    await saveClaudeMemories(repository, first, memories);
+    await saveClaudeMemories(repository, second, memories);
+
+    const firstStored = await repository.listMemories(first.id);
+    const secondStored = await repository.listMemories(second.id);
+    expect(firstStored).toHaveLength(2);
+    expect(secondStored).toHaveLength(2);
+    expect(firstStored.map((memory) => memory.id)).not.toEqual(secondStored.map((memory) => memory.id));
   });
 
   it("re-imports the same export without duplicating messages", async () => {

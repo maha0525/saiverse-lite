@@ -82,7 +82,7 @@ img { max-width: 100%; display: block; }
 .button.danger-button { border-color: var(--danger); background: transparent; color: var(--danger); }
 .text-button { border: 0; padding: 4px 0; background: transparent; color: var(--accent-strong); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
 .text-button.compact { opacity: 0; margin-top: 7px; }
-.message-row:hover .text-button.compact, .text-button.compact:focus { opacity: 1; }
+.message-row:hover .text-button.compact, .text-button.compact:focus-visible { opacity: 1; }
 .text-button.danger { color: var(--danger); }
 .count-badge, .local-chip, .status-chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .local-chip { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
@@ -107,6 +107,7 @@ textarea { resize: vertical; line-height: 1.6; }
 .message-avatar { width: 34px; height: 34px; border-radius: 50%; font-size: 12px; }
 .message-row.user .message-avatar { background: var(--surface-3); color: var(--text); border-color: var(--line); }
 .message-body { max-width: min(78%, 680px); }
+.message-actions { display: flex; gap: 12px; }
 .message-meta { display: flex; align-items: center; gap: 8px; margin: 0 3px 6px; color: var(--muted); font-size: 11px; }
 .message-meta strong { color: var(--text); font-size: 12px; }
 .message-row.user .message-meta { justify-content: flex-end; }
@@ -240,6 +241,7 @@ textarea { resize: vertical; line-height: 1.6; }
 .import-dialog .modal-head > div { min-width: 0; }
 .import-dialog .modal-head h2 { margin-top: 5px; }
 .import-new-persona { display: grid; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); }
+.import-memory-note { margin: -4px 0 0; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); color: var(--muted); font-size: 12px; line-height: 1.6; }
 .import-conversation-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .import-conversation-heading > div { display: flex; gap: 12px; }
 .import-conversation-heading > div:first-child { display: grid; gap: 3px; }

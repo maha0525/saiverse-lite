@@ -18,7 +18,9 @@ export type ConversationImportTarget =
     };
 
 interface OfficialImportDialogProps {
+  source: "chatgpt" | "claude";
   conversations: ImportedConversation[];
+  memoryCount: number;
   personas: Persona[];
   providers: ProviderConfig[];
   defaultPersonaId: string;
@@ -33,6 +35,7 @@ function conversationDate(conversation: ImportedConversation): string {
 }
 
 export function OfficialImportDialog(props: OfficialImportDialogProps) {
+  const sourceName = props.source === "chatgpt" ? "ChatGPT" : "Claude";
   const defaultPersona = props.personas.find((persona) => persona.id === props.defaultPersonaId);
   const firstProvider = props.providers.find((provider) => provider.id === defaultPersona?.providerId) ?? props.providers[0];
   const firstTemplate = PERSONA_TEMPLATES[0]!;
@@ -78,7 +81,7 @@ export function OfficialImportDialog(props: OfficialImportDialogProps) {
     <div className="modal-overlay" role="presentation">
       <section className="modal-panel import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-dialog-title">
         <div className="modal-head">
-          <div><span className="eyebrow">CHATGPT IMPORT</span><h2 id="import-dialog-title">連れてくる会話とパートナーを選ぶ</h2></div>
+          <div><span className="eyebrow">{sourceName.toLocaleUpperCase("en-US")} IMPORT</span><h2 id="import-dialog-title">連れてくる会話とパートナーを選ぶ</h2></div>
           <button type="button" className="modal-close" onClick={props.onClose} aria-label="閉じる" disabled={props.busy}><X size={18} /></button>
         </div>
 
@@ -88,6 +91,8 @@ export function OfficialImportDialog(props: OfficialImportDialogProps) {
             <option value="__new__">＋ 新しいパートナーを作る</option>
           </select>
         </label>
+
+        {props.source === "claude" && props.memoryCount > 0 && <p className="import-memory-note">Claudeが持っていた記憶 {props.memoryCount}件も、選んだパートナーへ一緒に取り込みます。</p>}
 
         {isNew && <div className="import-new-persona">
           <label className="field"><span>新しいパートナーの名前</span><input value={newPersona.name} onChange={(event) => {

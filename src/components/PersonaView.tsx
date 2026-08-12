@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { newId, type Persona, type ProviderConfig, type ToolId } from "../domain";
-import { loadDraft, saveDraft } from "../onboarding";
+import { buildPersonaPrompt, loadDraft, PERSONA_TEMPLATES, saveDraft } from "../onboarding";
 
 const NEW_FORM_DRAFT_KEY = "personaForm.new";
 
@@ -44,6 +44,7 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
   const selected = personas.find((persona) => persona.id === selectedId);
   const [draft, setDraft] = useState<Persona>(() => selected ?? blankPersona(providers[0]));
   const [isNew, setIsNew] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   useEffect(() => {
     if (selected && !isNew) setDraft(structuredClone(selected));
   }, [selected, isNew]);
@@ -65,6 +66,7 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
     await onSave(saved);
     if (isNew) saveDraft(NEW_FORM_DRAFT_KEY, "");
     setIsNew(false);
+    setSelectedTemplateId(null);
     onSelect(saved.id);
   };
   const setTool = (tool: ToolId, checked: boolean) => {
@@ -78,11 +80,11 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
   };
   return (
     <section className="view content-view" aria-labelledby="persona-title">
-      <header className="view-header persona-view-header"><div><span className="eyebrow">PERSONA</span><h1 id="persona-title">パートナー</h1><p>人格・話し方・使うモデルを、ひとりずつ固定します。</p></div><button className="button" onClick={() => { setDraft(restoreNewDraft(blankPersona(providers[0]))); setIsNew(true); }}>新しく迎える</button></header>
+      <header className="view-header persona-view-header"><div><span className="eyebrow">PERSONA</span><h1 id="persona-title">パートナー</h1><p>人格・話し方・使うモデルを、ひとりずつ固定します。</p></div><button className="button" onClick={() => { setDraft(restoreNewDraft(blankPersona(providers[0]))); setSelectedTemplateId(null); setIsNew(true); }}>新しく迎える</button></header>
       <div className="split-layout">
         <aside className="card-list" aria-label="ペルソナ一覧">
           {personas.map((persona) => (
-            <button key={persona.id} className={persona.id === selectedId && !isNew ? "persona-card selected" : "persona-card"} onClick={() => { setIsNew(false); onSelect(persona.id); }}>
+            <button key={persona.id} className={persona.id === selectedId && !isNew ? "persona-card selected" : "persona-card"} onClick={() => { setIsNew(false); setSelectedTemplateId(null); onSelect(persona.id); }}>
               <span className="card-avatar">{persona.avatarDataUrl ? <img src={persona.avatarDataUrl} alt="" /> : persona.name.slice(0, 1)}</span>
               <span className="persona-card-copy"><strong>{persona.name}</strong><small>{persona.description || "説明はまだありません"}</small></span>
             </button>
@@ -95,8 +97,32 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
             <label className="button secondary file-button">アイコンを選ぶ<input type="file" accept="image/*" onChange={(event) => loadAvatar(event.target.files?.[0])} /></label>
             {draft.avatarDataUrl && <button type="button" className="text-button danger" onClick={() => setDraft((current) => ({ ...current, avatarDataUrl: null }))}>外す</button>}
           </div>
-          <label className="field"><span>名前</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required /></label>
+          <label className="field"><span>名前</span><input value={draft.name} onChange={(event) => {
+            const template = PERSONA_TEMPLATES.find((item) => item.id === selectedTemplateId);
+            setDraft({ ...draft, name: event.target.value, systemPrompt: template ? buildPersonaPrompt(event.target.value, template) : draft.systemPrompt });
+          }} required /></label>
           <label className="field"><span>紹介</span><input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="どんな子か、短い紹介" /></label>
+          {isNew && <div className="field"><span>性格のプリセット</span><div className="wizard-cards small persona-template-cards">
+            {PERSONA_TEMPLATES.map((template) => (
+              <button
+                type="button"
+                key={template.id}
+                className={selectedTemplateId === template.id ? "choice-card selected" : "choice-card"}
+                onClick={() => {
+                  const previousTemplate = PERSONA_TEMPLATES.find((item) => item.id === selectedTemplateId);
+                  setSelectedTemplateId(template.id);
+                  setDraft((current) => ({
+                    ...current,
+                    description: !current.description || current.description === previousTemplate?.description ? template.description : current.description,
+                    systemPrompt: buildPersonaPrompt(current.name, template),
+                  }));
+                }}
+              >
+                <strong>{template.label}</strong>
+                <p>{template.description}</p>
+              </button>
+            ))}
+          </div></div>}
           <label className="field"><span>システムプロンプト（固定 head）</span><textarea rows={9} value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} required /></label>
           <div className="field-grid">
             <label className="field"><span>プロバイダ</span><select value={draft.providerId} onChange={(event) => {

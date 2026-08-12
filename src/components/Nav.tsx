@@ -24,7 +24,6 @@ export function Nav({ active, onChange, online }: NavProps) {
         <div className="brand-mark" aria-hidden="true"><img src={logoUrl} alt="" /></div>
         <div>
           <strong>SAIVerse Lite</strong>
-          <span>ふたりの部屋</span>
         </div>
       </div>
       <div className="nav-items">

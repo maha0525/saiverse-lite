@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatService } from "./chatService";
+import { ChatService, systemPromptWithUserIdentity } from "./chatService";
 import { ChatOperationError } from "./chatErrors";
-import { createDefaultPersona, newId, type ChatMessage, type ConversationThread, type MemoryEntry } from "./domain";
+import { createDefaultPersona, DEFAULT_SETTINGS, newId, type ChatMessage, type ConversationThread, type MemoryEntry } from "./domain";
 import { retryDefaults } from "./llm/retry";
 import { MemoryRepository } from "./storage/memoryRepository";
 
@@ -13,7 +13,7 @@ describe("ChatService with mock provider", () => {
   it("streams, persists, and creates a deterministic automatic summary", async () => {
     const repository = new MemoryRepository();
     await repository.initialize();
-    await repository.putSettings({ id: "app", theme: "system", summaryEveryMessages: 2, recentContextMessages: 24, storagePersisted: null });
+    await repository.putSettings({ ...DEFAULT_SETTINGS, summaryEveryMessages: 2 });
     const persona = createDefaultPersona();
     const now = Date.now();
     const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
@@ -28,7 +28,7 @@ describe("ChatService with mock provider", () => {
   it("runs the registered memory recall tool and returns its result to the model", async () => {
     const repository = new MemoryRepository();
     await repository.initialize();
-    await repository.putSettings({ id: "app", theme: "system", summaryEveryMessages: 50, recentContextMessages: 24, storagePersisted: null });
+    await repository.putSettings({ ...DEFAULT_SETTINGS, summaryEveryMessages: 50 });
     const persona = createDefaultPersona();
     const now = Date.now();
     const memory: MemoryEntry = {
@@ -40,6 +40,25 @@ describe("ChatService with mock provider", () => {
     const result = await new ChatService(repository).send(persona, thread, "猫の名前を思い出して");
     expect(result.content).toContain("ミケ");
     expect((await repository.listMessages(thread.id)).some((message) => message.role === "tool" && message.toolName === "memory_recall")).toBe(true);
+  });
+
+  it("reports the stored user message before the response pipeline finishes", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "取り込んだ長い会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    let stored: ChatMessage | null = null;
+    const events: string[] = [];
+    await new ChatService(repository).send(persona, thread, "今の発言", {
+      onUserMessageStored: (message) => { stored = message; events.push("user-stored"); },
+      onDelta: () => events.push("response-delta"),
+    });
+    expect(stored).toMatchObject({ role: "user", content: "今の発言", threadId: thread.id });
+    expect((await repository.listMessages(thread.id)).some((message) => message.id === stored?.id)).toBe(true);
+    expect(events[0]).toBe("user-stored");
+    expect(events).toContain("response-delta");
   });
 
   it("removes the failed user turn and restores the thread after a provider error", async () => {
@@ -83,7 +102,7 @@ describe("ChatService with mock provider", () => {
   it("tells the user a retry is under way, then clears the notice once the stream arrives", async () => {
     const repository = new MemoryRepository();
     await repository.initialize();
-    await repository.putSettings({ id: "app", theme: "system", summaryEveryMessages: 50, recentContextMessages: 24, storagePersisted: null });
+    await repository.putSettings({ ...DEFAULT_SETTINGS, summaryEveryMessages: 50 });
     const now = Date.now();
     const provider = {
       id: "provider_gemini_retry",
@@ -175,5 +194,11 @@ describe("ChatService with mock provider", () => {
     expect((caught as ChatOperationError).operation).toBe("regenerate");
     expect((caught as ChatOperationError).rollbackSucceeded).toBe(true);
     expect(await repository.listMessages(thread.id)).toEqual(previousMessages);
+  });
+
+  it("adds the configured user name to the system prompt", () => {
+    expect(systemPromptWithUserIdentity("基本の人格", { ...DEFAULT_SETTINGS, userName: "まはー" }))
+      .toBe("基本の人格\n\n会話相手であるユーザーの名前は「まはー」です。");
+    expect(systemPromptWithUserIdentity("基本の人格", DEFAULT_SETTINGS)).toBe("基本の人格");
   });
 });

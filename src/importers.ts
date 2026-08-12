@@ -307,7 +307,17 @@ export async function saveImportedConversations(
   let messageCount = 0;
   for (const conversation of conversations) {
     const now = Date.now();
-    const threadId = `thread_import_${conversation.source}_${conversation.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+    const safeConversationId = conversation.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const safePersonaId = persona.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const legacyThreadId = `thread_import_${conversation.source}_${safeConversationId}`;
+    const legacyThread = await repository.getThread(legacyThreadId);
+    // Older releases omitted personaId from imported IDs. Reuse that ID only
+    // when it already belongs to this persona; otherwise scope IDs per persona
+    // so the same export can safely be split across multiple partners.
+    const usesLegacyIds = legacyThread?.personaId === persona.id;
+    const threadId = usesLegacyIds
+      ? legacyThreadId
+      : `thread_import_${conversation.source}_${safePersonaId}_${safeConversationId}`;
     const timestamps = conversation.messages.map((message) => message.createdAt).filter((value): value is number => value !== null);
     const createdAt = conversation.createdAt ?? (timestamps.length ? Math.min(...timestamps) : now);
     const updatedAt = conversation.updatedAt ?? (timestamps.length ? Math.max(...timestamps) : createdAt);
@@ -324,7 +334,9 @@ export async function saveImportedConversations(
       if (!imported || (imported.role !== "user" && imported.role !== "assistant")) continue;
       const message: ChatMessage = {
         id: imported.sourceId
-          ? `message_import_${conversation.source}_${imported.sourceId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+          ? usesLegacyIds
+            ? `message_import_${conversation.source}_${imported.sourceId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+            : `message_import_${conversation.source}_${safePersonaId}_${safeConversationId}_${imported.sourceId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
           : newId("message"),
         threadId,
         personaId: persona.id,

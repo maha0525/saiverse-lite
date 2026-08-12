@@ -1,5 +1,6 @@
 import {
   newId,
+  type AppSettings,
   type ChatMessage,
   type ConversationThread,
   type MemoryEntry,
@@ -20,12 +21,18 @@ export type ChatStatusTone = "info" | "warning";
 export interface ChatCallbacks {
   onDelta?(text: string): void;
   onStatus?(status: string, tone?: ChatStatusTone): void;
+  onUserMessageStored?(message: ChatMessage): void;
 }
 
 const TOOL_STATUS: Record<ToolId, string> = {
   memory_recall: "記憶を確認しています…",
   image_generate: "画像を生成しています…",
 };
+
+export function systemPromptWithUserIdentity(systemPrompt: string, settings: AppSettings): string {
+  const userName = settings.userName.trim();
+  return userName ? `${systemPrompt}\n\n会話相手であるユーザーの名前は「${userName}」です。` : systemPrompt;
+}
 
 /**
  * The provider is retrying on its own, so the wait is expected rather than a
@@ -148,6 +155,7 @@ export class ChatService {
     try {
       await this.repository.putMessage(userMessage);
       await this.repository.putThread({ ...thread, updatedAt: now, title: thread.title === "新しい会話" ? content.trim().slice(0, 36) || thread.title : thread.title });
+      callbacks.onUserMessageStored?.(userMessage);
       return await this.continueConversation(persona, thread.id, callbacks, signal);
     } catch (error) {
       throw await this.rollbackConversation("send", thread, messagesBefore, error);
@@ -205,7 +213,7 @@ export class ChatService {
       const recent = messages.slice(-settings.recentContextMessages).map(toProviderMessage);
       for await (const event of provider.stream({
         model: persona.model || config.defaultModel,
-        systemPrompt: persona.systemPrompt,
+        systemPrompt: systemPromptWithUserIdentity(persona.systemPrompt, settings),
         memoryContext: memoryContext(memories),
         messages: recent,
         tools: definitions,
@@ -310,7 +318,8 @@ export class ChatService {
     }
     const candidates = messages.slice(startIndex);
     if (candidates.length < settings.summaryEveryMessages) return;
-    const transcript = candidates.map((message) => `${message.role === "user" ? "ユーザー" : persona.name}: ${message.content}`).join("\n");
+    const userName = settings.userName.trim() || "ユーザー";
+    const transcript = candidates.map((message) => `${message.role === "user" ? userName : persona.name}: ${message.content}`).join("\n");
     const providerConfig = provider.config;
     let summary = "";
     const promptMessage: ProviderMessage = {
@@ -323,7 +332,7 @@ export class ChatService {
     try {
       for await (const event of provider.stream({
         model: persona.model || providerConfig.defaultModel,
-        systemPrompt: persona.systemPrompt,
+        systemPrompt: systemPromptWithUserIdentity(persona.systemPrompt, settings),
         memoryContext: "",
         messages: [promptMessage],
         tools: definitions,

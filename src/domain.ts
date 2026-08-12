@@ -83,6 +83,8 @@ export interface ProviderConfig {
 export interface AppSettings {
   id: "app";
   theme: ThemeMode;
+  userName: string;
+  userAvatarDataUrl: string | null;
   summaryEveryMessages: number;
   recentContextMessages: number;
   storagePersisted: boolean | null;
@@ -103,6 +105,8 @@ export interface RepositorySnapshot {
 export const DEFAULT_SETTINGS: AppSettings = {
   id: "app",
   theme: "system",
+  userName: "",
+  userAvatarDataUrl: null,
   summaryEveryMessages: 12,
   recentContextMessages: 24,
   storagePersisted: null,

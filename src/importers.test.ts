@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { newId, type Persona } from "./domain";
+import { newId, type ConversationThread, type Persona } from "./domain";
 import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, saveImportedConversations } from "./importers";
 import { MemoryRepository } from "./storage/memoryRepository";
 
@@ -107,5 +107,45 @@ describe("official export adapters", () => {
     expect(threads).toHaveLength(1);
     const messages = await repository.listMessages(threads[0]!.id);
     expect(messages).toHaveLength(2);
+  });
+
+  it("can import the same conversation into different personas without ID collisions", async () => {
+    const repository = new MemoryRepository();
+    const first = { ...testPersona(), id: "persona_first_import" };
+    const second = { ...testPersona(), id: "persona_second_import" };
+    await repository.putPersona(first);
+    await repository.putPersona(second);
+    const file = new File([JSON.stringify(CLAUDE_CONVERSATIONS)], "conversations.json", { type: "application/json" });
+    const conversations = await new ClaudeExportAdapter().parse(file);
+    await saveImportedConversations(repository, first, conversations);
+    await saveImportedConversations(repository, second, conversations);
+    const firstThreads = await repository.listThreads(first.id);
+    const secondThreads = await repository.listThreads(second.id);
+    expect(firstThreads).toHaveLength(1);
+    expect(secondThreads).toHaveLength(1);
+    expect(firstThreads[0]?.id).not.toBe(secondThreads[0]?.id);
+    expect(await repository.listMessages(firstThreads[0]!.id)).toHaveLength(2);
+    expect(await repository.listMessages(secondThreads[0]!.id)).toHaveLength(2);
+  });
+
+  it("reuses an older unscoped imported thread when it already belongs to the target persona", async () => {
+    const repository = new MemoryRepository();
+    const persona = { ...testPersona(), id: "persona_legacy" };
+    await repository.putPersona(persona);
+    const legacyThread: ConversationThread = {
+      id: "thread_import_claude_11111111-1111-4111-8111-111111111111",
+      personaId: persona.id,
+      title: "以前の取り込み",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    await repository.putThread(legacyThread);
+    const file = new File([JSON.stringify(CLAUDE_CONVERSATIONS)], "conversations.json", { type: "application/json" });
+    const conversations = await new ClaudeExportAdapter().parse(file);
+    await saveImportedConversations(repository, persona, conversations);
+    const threads = await repository.listThreads(persona.id);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]?.id).toBe(legacyThread.id);
+    expect(await repository.listMessages(legacyThread.id)).toHaveLength(2);
   });
 });

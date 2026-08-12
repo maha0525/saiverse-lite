@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultPersona, type ChatMessage, type ConversationThread, type MemoryEntry, type RepositorySnapshot } from "./domain";
+import { createDefaultPersona, DEFAULT_SETTINGS, type ChatMessage, type ConversationThread, type MemoryEntry, type RepositorySnapshot } from "./domain";
 import { exportFullBackup, exportSaiverseMemory, importSaiverseMemory, parseFullBackup } from "./formats";
 
 const persona = { ...createDefaultPersona(1_700_000_000_000), id: "persona_air", name: "エア" };
@@ -80,12 +80,23 @@ describe("full backup", () => {
         createdAt: 1,
         updatedAt: 1,
       }],
-      settings: { id: "app", theme: "dark", summaryEveryMessages: 12, recentContextMessages: 24, storagePersisted: true },
+      settings: { ...DEFAULT_SETTINGS, theme: "dark", storagePersisted: true },
     };
     const backup = exportFullBackup(snapshot, 2);
     expect(backup.data.providers[0]?.apiKey).toBe("");
     const restored = parseFullBackup(JSON.parse(JSON.stringify(backup)));
     expect(restored.personas[0]?.name).toBe("エア");
     expect(restored.providers[0]?.apiKey).toBe("");
+  });
+
+  it("fills user profile defaults when restoring an older backup", () => {
+    const oldBackup = {
+      format: "saiverse_lite_backup_v1",
+      data: {
+        personas: [], threads: [], messages: [], memories: [], providers: [],
+        settings: { id: "app", theme: "system", summaryEveryMessages: 12, recentContextMessages: 24, storagePersisted: null },
+      },
+    };
+    expect(parseFullBackup(oldBackup).settings).toMatchObject({ userName: "", userAvatarDataUrl: null });
   });
 });

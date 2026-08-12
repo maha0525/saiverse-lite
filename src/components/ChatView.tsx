@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatStatusTone } from "../chatService";
-import type { ChatMessage, ConversationThread, Persona } from "../domain";
+import type { AppSettings, ChatMessage, ConversationThread, Persona } from "../domain";
 import { loadDraft, saveDraft } from "../onboarding";
 
 interface ChatViewProps {
   persona: Persona;
+  settings: AppSettings;
   threads: ConversationThread[];
   activeThreadId: string | null;
   messages: ChatMessage[];
@@ -24,7 +25,7 @@ function time(value: number): string {
   return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(value);
 }
 
-function MessageBubble({ message, persona, onEdit }: { message: ChatMessage; persona: Persona; onEdit(message: ChatMessage, content: string): Promise<void> }) {
+function MessageBubble({ message, persona, settings, onEdit }: { message: ChatMessage; persona: Persona; settings: AppSettings; onEdit(message: ChatMessage, content: string): Promise<void> }) {
   const imageDataUrl = typeof message.metadata.imageDataUrl === "string" ? message.metadata.imageDataUrl : null;
   if (message.role === "tool") {
     return (
@@ -35,7 +36,8 @@ function MessageBubble({ message, persona, onEdit }: { message: ChatMessage; per
       </details>
     );
   }
-  const label = message.role === "user" ? "あなた" : persona.name;
+  const userName = settings.userName.trim() || "あなた";
+  const label = message.role === "user" ? userName : persona.name;
   const edit = () => {
     const next = window.prompt("メッセージを編集", message.content);
     if (next !== null && next.trim() && next !== message.content) void onEdit(message, next.trim());
@@ -45,7 +47,9 @@ function MessageBubble({ message, persona, onEdit }: { message: ChatMessage; per
       <div className="message-avatar" aria-hidden="true">
         {message.role === "assistant" && persona.avatarDataUrl
           ? <img src={persona.avatarDataUrl} alt="" />
-          : label.slice(0, 1)}
+          : message.role === "user" && settings.userAvatarDataUrl
+            ? <img src={settings.userAvatarDataUrl} alt="" />
+            : label.slice(0, 1)}
       </div>
       <div className="message-body">
         <div className="message-meta"><strong>{label}</strong><time>{time(message.createdAt)}</time>{message.editedAt && <span>編集済み</span>}</div>
@@ -118,10 +122,10 @@ export function ChatView(props: ChatViewProps) {
         {props.messages.length === 0 && !props.streamingText && (
           <div className="empty-state"><span>ここから始まる</span><h2>{props.persona.name}との新しい時間</h2><p>会話も記憶も、この端末の中に保存されます。</p></div>
         )}
-        {props.messages.map((message) => <MessageBubble key={message.id} message={message} persona={props.persona} onEdit={props.onEdit} />)}
+        {props.messages.map((message) => <MessageBubble key={message.id} message={message} persona={props.persona} settings={props.settings} onEdit={props.onEdit} />)}
         {props.streamingText && (
           <article className="message-row assistant streaming">
-            <div className="message-avatar" aria-hidden="true">{props.persona.name.slice(0, 1)}</div>
+            <div className="message-avatar" aria-hidden="true">{props.persona.avatarDataUrl ? <img src={props.persona.avatarDataUrl} alt="" /> : props.persona.name.slice(0, 1)}</div>
             <div className="message-body"><div className="message-meta"><strong>{props.persona.name}</strong></div><div className="message-content">{props.streamingText}<span className="cursor" /></div></div>
           </article>
         )}

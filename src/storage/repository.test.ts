@@ -1,12 +1,15 @@
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it } from "vitest";
-import { newId, type ChatMessage, type ConversationThread, type MemoryEntry } from "../domain";
+import { DEFAULT_SETTINGS, newId, type ChatMessage, type ConversationThread, type MemoryEntry } from "../domain";
 import { IndexedDbRepository } from "./indexedDbRepository";
 import { MemoryRepository } from "./memoryRepository";
 import type { LiteRepository } from "./repository";
 
 async function exercise(repository: LiteRepository): Promise<void> {
   await repository.initialize();
+  expect(await repository.getSettings()).toMatchObject({ userName: "", userAvatarDataUrl: null });
+  await repository.putSettings({ ...DEFAULT_SETTINGS, userName: "まはー", userAvatarDataUrl: "data:image/png;base64,test" });
+  expect(await repository.getSettings()).toMatchObject({ userName: "まはー", userAvatarDataUrl: "data:image/png;base64,test" });
   const persona = (await repository.listPersonas())[0];
   expect(persona).toBeDefined();
   if (!persona) return;

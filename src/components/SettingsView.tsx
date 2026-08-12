@@ -54,7 +54,17 @@ export function SettingsView(props: SettingsViewProps) {
   };
   const submitSettings = async (event: FormEvent) => {
     event.preventDefault();
-    await props.onSaveSettings(localSettings);
+    await props.onSaveSettings({ ...localSettings, userName: localSettings.userName.trim() });
+  };
+  const loadUserAvatar = (file: File | undefined) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setLocalSettings((current) => ({
+      ...current,
+      userAvatarDataUrl: typeof reader.result === "string" ? reader.result : null,
+    }));
+    reader.onerror = () => console.warn("[SAIVerse Lite][settings] user avatar could not be read", { name: file.name, type: file.type, size: file.size });
+    reader.readAsDataURL(file);
   };
   return (
     <section className="view content-view" aria-labelledby="settings-title">
@@ -82,6 +92,12 @@ export function SettingsView(props: SettingsViewProps) {
         </form>
         <form className="panel form-panel" onSubmit={(event) => void submitSettings(event)}>
           <div className="form-heading"><h2>アプリ</h2><span className={localSettings.storagePersisted ? "status-chip good" : "status-chip"}>{localSettings.storagePersisted ? "永続ストレージ許可済み" : "通常ストレージ"}</span></div>
+          <div className="avatar-editor">
+            <div className="large-avatar user-avatar">{localSettings.userAvatarDataUrl ? <img src={localSettings.userAvatarDataUrl} alt="" /> : localSettings.userName.trim().slice(0, 1) || "あ"}</div>
+            <label className="button secondary file-button">ユーザーアイコンを選ぶ<input type="file" accept="image/*" onChange={(event) => loadUserAvatar(event.target.files?.[0])} /></label>
+            {localSettings.userAvatarDataUrl && <button type="button" className="text-button danger" onClick={() => setLocalSettings((current) => ({ ...current, userAvatarDataUrl: null }))}>外す</button>}
+          </div>
+          <label className="field"><span>あなたの名前</span><input value={localSettings.userName} onChange={(event) => setLocalSettings({ ...localSettings, userName: event.target.value })} placeholder="未設定の場合は「あなた」と表示" /></label>
           <label className="field"><span>テーマ</span><select value={localSettings.theme} onChange={(event) => setLocalSettings({ ...localSettings, theme: event.target.value as AppSettings["theme"] })}><option value="system">端末に合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
           <label className="field"><span>自動要約までの発言数</span><input type="number" min={4} max={100} value={localSettings.summaryEveryMessages} onChange={(event) => setLocalSettings({ ...localSettings, summaryEveryMessages: Number(event.target.value) })} /></label>
           <label className="field"><span>会話へ入れる直近メッセージ数</span><input type="number" min={4} max={200} value={localSettings.recentContextMessages} onChange={(event) => setLocalSettings({ ...localSettings, recentContextMessages: Number(event.target.value) })} /></label>

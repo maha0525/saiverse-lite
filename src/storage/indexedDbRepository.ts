@@ -109,7 +109,10 @@ export class IndexedDbRepository implements LiteRepository {
   async putProvider(value: ProviderConfig): Promise<void> { await (await this.database()).put("providers", value); }
   async deleteProvider(id: string): Promise<void> { if (id !== "provider_mock") await (await this.database()).delete("providers", id); }
 
-  async getSettings(): Promise<AppSettings> { return (await (await this.database()).get("settings", "app")) ?? { ...DEFAULT_SETTINGS }; }
+  async getSettings(): Promise<AppSettings> {
+    const stored = await (await this.database()).get("settings", "app");
+    return stored ? { ...DEFAULT_SETTINGS, ...stored, id: "app" } : { ...DEFAULT_SETTINGS };
+  }
   async putSettings(value: AppSettings): Promise<void> { await (await this.database()).put("settings", value); }
 
   async exportSnapshot(includeSecrets = false): Promise<RepositorySnapshot> {

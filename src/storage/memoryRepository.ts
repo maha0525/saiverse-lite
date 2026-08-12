@@ -65,7 +65,7 @@ export class MemoryRepository implements LiteRepository {
   async putProvider(value: ProviderConfig): Promise<void> { this.providers.set(value.id, structuredClone(value)); }
   async deleteProvider(id: string): Promise<void> { if (id !== "provider_mock") this.providers.delete(id); }
 
-  async getSettings(): Promise<AppSettings> { return structuredClone(this.settings); }
+  async getSettings(): Promise<AppSettings> { return { ...structuredClone(DEFAULT_SETTINGS), ...structuredClone(this.settings), id: "app" }; }
   async putSettings(value: AppSettings): Promise<void> { this.settings = structuredClone(value); }
 
   async exportSnapshot(includeSecrets = false): Promise<RepositorySnapshot> {

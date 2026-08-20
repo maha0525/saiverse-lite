@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>SAIVerse Lite — オンデバイス Gemma 4 最小スパイク</title>
+    <style>
+      :root {
+        --bg: #f5f5f4;
+        --bg-card: #ffffff;
+        --fg: #1c1917;
+        --fg-muted: #57534e;
+        --border: #d6d3d1;
+        --accent: #2563eb;
+        --accent-fg: #ffffff;
+        --danger: #b91c1c;
+        --ok: #15803d;
+        --warn-bg: #fef3c7;
+        --warn-fg: #78350f;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Code", monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #171412;
+          --bg-card: #211d1a;
+          --fg: #f2ede8;
+          --fg-muted: #a8a29e;
+          --border: #3f3a35;
+          --accent: #60a5fa;
+          --accent-fg: #0b1220;
+          --danger: #f87171;
+          --ok: #4ade80;
+          --warn-bg: #3f2f0f;
+          --warn-fg: #fcd34d;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.55;
+      }
+
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 0.25rem;
+      }
+
+      h2 {
+        font-size: 1.05rem;
+        margin: 0 0 0.75rem;
+      }
+
+      h3 {
+        font-size: 0.95rem;
+        margin: 1rem 0 0.4rem;
+        color: var(--fg-muted);
+      }
+
+      .subtitle {
+        color: var(--fg-muted);
+        margin: 0;
+        font-size: 0.9rem;
+      }
+
+      .notice {
+        background: var(--warn-bg);
+        color: var(--warn-fg);
+        border-radius: 0.5rem;
+        padding: 0.6rem 0.85rem;
+        font-size: 0.85rem;
+      }
+
+      section {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 0.75rem;
+        padding: 1rem 1.15rem;
+      }
+
+      dl#env-list {
+        display: grid;
+        grid-template-columns: minmax(10rem, max-content) 1fr;
+        gap: 0.35rem 1rem;
+        margin: 0;
+        font-size: 0.9rem;
+      }
+
+      dl#env-list dt {
+        color: var(--fg-muted);
+      }
+
+      dl#env-list dd {
+        margin: 0;
+        word-break: break-word;
+      }
+
+      label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--fg-muted);
+        margin-bottom: 0.75rem;
+      }
+
+      label span {
+        display: block;
+        margin-bottom: 0.25rem;
+      }
+
+      input[type="text"],
+      input[type="number"],
+      textarea {
+        width: 100%;
+        padding: 0.45rem 0.6rem;
+        border-radius: 0.4rem;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--mono);
+        font-size: 0.85rem;
+      }
+
+      textarea {
+        min-height: 4.5rem;
+        resize: vertical;
+      }
+
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .row input[type="text"] {
+        flex: 1;
+        min-width: 12rem;
+      }
+
+      button {
+        padding: 0.45rem 0.9rem;
+        border-radius: 0.4rem;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-fg);
+        font-size: 0.85rem;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      button.secondary {
+        background: transparent;
+        color: var(--fg);
+        border-color: var(--border);
+      }
+
+      #engine-status,
+      #conversation-status {
+        font-size: 0.85rem;
+        color: var(--fg-muted);
+        margin: 0.5rem 0 0;
+      }
+
+      .output-box {
+        white-space: pre-wrap;
+        word-break: break-word;
+        min-height: 4rem;
+        max-height: 22rem;
+        overflow-y: auto;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 0.4rem;
+        padding: 0.6rem 0.75rem;
+        font-family: var(--mono);
+        font-size: 0.85rem;
+      }
+
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 0.4rem;
+        padding: 0.6rem 0.75rem;
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        max-height: 16rem;
+        overflow-y: auto;
+        margin: 0;
+      }
+
+      #log-output {
+        max-height: 24rem;
+      }
+
+      details summary {
+        cursor: pointer;
+        font-size: 0.85rem;
+        color: var(--fg-muted);
+        margin-bottom: 0.4rem;
+      }
+
+      .status-ok {
+        color: var(--ok);
+      }
+
+      .status-bad {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>SAIVerse Lite — オンデバイス Gemma 4 最小スパイク</h1>
+        <p class="subtitle">
+          検証専用ページ (docs/gemma4_on_device.md 実装順 A)。SAIVerse Lite 本体の UI・状態管理には一切依存しません。
+        </p>
+        <p class="notice">
+          「エンジン初期化」を押すとモデル本体 (約 2 GB) を Hugging Face からダウンロードします。実行前に通信環境と空き容量を確認してください。
+        </p>
+      </header>
+
+      <section id="env-section">
+        <h2>1. 環境チェック</h2>
+        <dl id="env-list">
+          <dt>読み込み中…</dt>
+          <dd></dd>
+        </dl>
+      </section>
+
+      <section id="engine-section">
+        <h2>2. モデル読み込み</h2>
+        <label
+          >モデル URL
+          <span></span>
+          <input
+            id="model-url"
+            type="text"
+            value="https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm"
+        /></label>
+        <label
+          >maxNumTokens
+          <span></span>
+          <input id="max-tokens" type="number" value="4096" min="1" step="1" />
+        </label>
+        <div class="row">
+          <button id="init-engine-btn" type="button">エンジン初期化</button>
+          <button id="dispose-engine-btn" type="button" class="secondary" disabled>エンジン破棄</button>
+        </div>
+        <p id="engine-status">未初期化</p>
+      </section>
+
+      <section id="conversation-section">
+        <h2>3. 会話</h2>
+        <label
+          >system prompt
+          <span></span>
+          <textarea id="system-prompt">あなたは日本語で簡潔に答えるアシスタントです。</textarea>
+        </label>
+        <div class="row">
+          <button id="start-conversation-btn" type="button" disabled>会話を開始</button>
+        </div>
+        <p id="conversation-status">未開始</p>
+
+        <div class="row" style="margin-top: 0.75rem">
+          <input id="message-input" type="text" placeholder="メッセージを入力して送信" disabled />
+          <button id="send-btn" type="button" disabled>送信</button>
+          <button id="cancel-btn" type="button" class="secondary" disabled>停止</button>
+        </div>
+
+        <h3>出力</h3>
+        <div id="output" class="output-box"></div>
+
+        <details id="channels-details">
+          <summary>channels（本文と分けて表示する生テキスト。thinking 等が本文に混ざっていないかの確認用）</summary>
+          <pre id="channels-output">(まだデータがありません)</pre>
+        </details>
+
+        <h3>getTokenCount() / getBenchmarkInfo()</h3>
+        <pre id="benchmark-output">(未取得)</pre>
+      </section>
+
+      <section id="log-section">
+        <h2>4. ログ</h2>
+        <pre id="log-output"></pre>
+      </section>
+    </main>
+    <script type="module" src="./local-gemma.ts"></script>
+  </body>
+</html>

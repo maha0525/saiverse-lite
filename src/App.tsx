@@ -21,6 +21,8 @@ import {
 } from "./domain";
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
 import { saveClaudeMemories, saveImportedConversations, type ClaudeMemoryText, type ImportedConversation } from "./importers";
+import { ensureEngine, getEngineStatus, subscribe as subscribeLiteRtEngine, type LiteRtEngineStatus } from "./llm/litertEngine";
+import { isLiteRtModelId } from "./llm/litertModels";
 import type { ConversationImportTarget } from "./components/OfficialImportDialog";
 import { LEGAL_VERSION } from "./legal";
 import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
@@ -71,12 +73,50 @@ export default function App() {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [wizard, setWizard] = useState<"full" | "consent" | null>(null);
 
+  const [engineStatus, setEngineStatus] = useState<LiteRtEngineStatus>(() => getEngineStatus());
+
   const selectedPersona = personas.find((persona) => persona.id === selectedPersonaId) ?? personas[0];
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
   const selectedPersonaIdRef = useRef(selectedPersonaId);
   const activeThreadIdRef = useRef(activeThreadId);
   selectedPersonaIdRef.current = selectedPersonaId;
   activeThreadIdRef.current = activeThreadId;
+
+  // 端末内モデル (litert-local) を使うペルソナだけ、選ばれた時点で Engine の読み込みを
+  // 先に始めておく (画面はブロックしない — 完了は engineStatus の購読で知る)。
+  const selectedPersonaProvider = providers.find((provider) => provider.id === selectedPersona?.providerId);
+  useEffect(() => {
+    if (!selectedPersona || selectedPersonaProvider?.kind !== "litert-local") return;
+    if (!isLiteRtModelId(selectedPersona.model)) return;
+    void ensureEngine(selectedPersona.model).catch((error) => {
+      console.error("[SAIVerse Lite][llm] failed to pre-load local model", { modelId: selectedPersona.model, error });
+    });
+    // selectedPersonaProvider は依存に入れない: プロバイダ一覧が再取得されるたびに参照が
+    // 変わるが、ペルソナ・モデルが同じなら ensureEngine() 側で既読エンジンを再利用するだけで
+    // 実害はない。ここではペルソナ/モデルの切り替えだけを再読み込みの契機にする。
+  }, [selectedPersona?.id, selectedPersona?.model]);
+
+  // 購読を張る前に状態が動いていることがある (上の先読み effect がこの effect より先に走り、
+  // ensureEngine() が同期的に loading を通知してしまう)。登録した瞬間に現在値を取り直さないと、
+  // 「読み込み中」の通知だけを聞き逃し、待っている間ずっと何も表示されない。
+  useEffect(() => {
+    setEngineStatus(getEngineStatus());
+    return subscribeLiteRtEngine(setEngineStatus);
+  }, []);
+
+  // 「今見ているペルソナが端末内モデルを使っていて、かつ engine が扱っているのがそのモデルか」
+  // が一致するときだけ ChatView へ状態を渡す。無関係なペルソナを見ているときに裏の読み込み状況を
+  // 出すと利用者が混乱するため、関係なければ null にする。
+  const localModelStatus = selectedPersona && selectedPersonaProvider?.kind === "litert-local"
+    && isLiteRtModelId(selectedPersona.model) && engineStatus.modelId === selectedPersona.model
+    ? engineStatus
+    : null;
+  const retryLocalModel = () => {
+    if (!selectedPersona || !isLiteRtModelId(selectedPersona.model)) return;
+    void ensureEngine(selectedPersona.model).catch((error) => {
+      console.error("[SAIVerse Lite][llm] retry to load local model failed", { modelId: selectedPersona.model, error });
+    });
+  };
 
   const loadThread = useCallback(async (threadId: string | null) => {
     setActiveThreadId(threadId);
@@ -355,7 +395,7 @@ export default function App() {
 
   const content = (() => {
     if (!selectedPersona) return <div className="empty-state"><h2>パートナーを読み込めませんでした</h2></div>;
-    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onDeleteMessage={deleteMessage} onRegenerate={regenerate} />;
+    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} localModelStatus={localModelStatus} onRetryLocalModel={retryLocalModel} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onDeleteMessage={deleteMessage} onRegenerate={regenerate} />;
     if (view === "personas") return <PersonaView personas={personas} providers={providers} selectedId={selectedPersona.id} onSelect={(id) => void selectPersona(id)} onSave={savePersona} onDelete={deletePersona} />;
     if (view === "memory") return <MemoryView persona={selectedPersona} memories={memories} onCreate={createMemory} onEdit={editMemory} onDelete={deleteMemory} />;
     if (view === "data") return <DataView

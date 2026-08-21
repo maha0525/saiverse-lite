@@ -1,4 +1,4 @@
-import type { Persona, ToolCall, ToolId } from "./domain";
+import type { Persona, ProviderConfig, ToolCall, ToolId } from "./domain";
 import type { RetryNotice } from "./llm/retry";
 import type { LlmProvider, ToolDefinition } from "./llm/types";
 import type { LiteRepository } from "./storage/repository";
@@ -30,8 +30,22 @@ export const TOOL_REGISTRY: Record<ToolId, ToolDefinition> = {
   },
 };
 
-export function toolDefinitionsFor(persona: Persona): ToolDefinition[] {
-  return persona.toolIds.map((id) => TOOL_REGISTRY[id]);
+/**
+ * A tool the provider cannot perform must not be offered to the model.
+ *
+ * `image_generate` calls `provider.generateImage()`, which needs an image model
+ * to call - a provider without one (Anthropic, and every on-device model) can
+ * only fail. Offering it anyway costs a wasted tool round every time the model
+ * takes the bait, and the persona has to explain an error it was set up to hit.
+ *
+ * `providerDefaults.ts` has claimed since the model table was introduced that a
+ * blank image model "disables the tool". Nothing implemented that; this does.
+ */
+export function toolDefinitionsFor(persona: Persona, provider: ProviderConfig): ToolDefinition[] {
+  const canGenerateImages = provider.imageModel.trim().length > 0;
+  return persona.toolIds
+    .filter((id) => id !== "image_generate" || canGenerateImages)
+    .map((id) => TOOL_REGISTRY[id]);
 }
 
 export interface ToolExecutionResult {

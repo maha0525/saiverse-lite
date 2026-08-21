@@ -124,6 +124,8 @@ textarea { resize: vertical; line-height: 1.6; }
 .chat-status.warning::before { width: 9px; height: 9px; flex: none; border-radius: 50%; background: currentColor; animation: chat-status-pulse 1.4s ease-in-out infinite; content: ""; }
 @keyframes chat-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .chat-status.warning::before { animation: none; } }
+.chat-status.error { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; width: 100%; max-width: 460px; padding: 8px 14px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line)); border-radius: 14px; background: color-mix(in srgb, var(--danger) 12%, var(--surface)); color: var(--danger); font-weight: 600; text-align: left; }
+.chat-status.error .text-button { color: inherit; }
 .composer-wrap { padding: 6px max(18px, calc((100% - 820px) / 2)) calc(12px + var(--safe-bottom)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(18px); }
 .conversation-actions { height: 24px; text-align: right; }
 .composer { display: flex; align-items: flex-end; gap: 9px; padding: 6px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 10px 40px color-mix(in srgb, var(--text) 8%, transparent); }
@@ -152,6 +154,7 @@ textarea { resize: vertical; line-height: 1.6; }
 .field > span, .tool-field legend { color: var(--muted); font-size: 12px; font-weight: 700; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .field-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.field-warning { margin: 0; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--warning) 12%, var(--surface)); color: var(--warning); font-size: 12px; font-weight: 600; line-height: 1.6; }
 .avatar-editor { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .file-button { display: inline-flex; align-items: center; justify-content: center; position: relative; overflow: hidden; cursor: pointer; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }

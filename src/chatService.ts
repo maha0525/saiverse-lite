@@ -12,6 +12,7 @@ import { ChatOperationError, type ChatOperation } from "./chatErrors";
 import { createProvider } from "./llm";
 import type { RetryAttempt, RetryNotice } from "./llm/retry";
 import type { ProviderMessage } from "./llm/types";
+import { requiresApiKey } from "./providerDefaults";
 import type { LiteRepository } from "./storage/repository";
 import { executeTool, toolDefinitionsFor } from "./tools";
 
@@ -188,10 +189,10 @@ export class ChatService {
   ): Promise<ChatMessage> {
     const config = await this.repository.getProvider(persona.providerId);
     if (!config) throw new Error("選択されたプロバイダ設定がありません");
-    if (config.kind !== "mock" && !config.apiKey) throw new Error(`${config.label} のAPIキーを設定してください`);
+    if (requiresApiKey(config.kind) && !config.apiKey) throw new Error(`${config.label} のAPIキーを設定してください`);
     const provider = createProvider(config);
     const settings = await this.repository.getSettings();
-    const definitions = toolDefinitionsFor(persona);
+    const definitions = toolDefinitionsFor(persona, config);
     const memories = await this.repository.listMemories(persona.id);
     let messages = await this.repository.listMessages(threadId);
     let finalMessage: ChatMessage | null = null;

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatStatusTone } from "../chatService";
 import type { AppSettings, ChatMessage, ConversationThread, Persona } from "../domain";
+import { formatLoadingElapsedMessage, type LiteRtEngineStatus } from "../llm/litertEngine";
 import { loadDraft, saveDraft } from "../onboarding";
 import { ThreadManagerDialog } from "./ThreadManagerDialog";
 
@@ -14,6 +15,13 @@ interface ChatViewProps {
   status: string;
   statusTone: ChatStatusTone;
   sending: boolean;
+  /**
+   * このペルソナが端末内モデル (litert-local) を使っていて、かつそのモデルの読み込み
+   * 状況に関係があるときだけ非 null になる (無関係なペルソナを見ているときは null — 呼び出し元の
+   * App.tsx が判定する)。「送信中だから待つ」(sending) とは別の「モデル準備中だから待つ」理由。
+   */
+  localModelStatus: LiteRtEngineStatus | null;
+  onRetryLocalModel(): void;
   onSelectThread(id: string): void;
   onCreateThread(): void;
   onDeleteThreads(ids: string[]): Promise<boolean>;
@@ -68,12 +76,24 @@ function MessageBubble({ message, persona, settings, disabled, onEdit, onDelete 
 export function ChatView(props: ChatViewProps) {
   const [draft, setDraft] = useState("");
   const [threadManagerOpen, setThreadManagerOpen] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const bottomRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeThreadRef = useRef(props.activeThreadId);
   activeThreadRef.current = props.activeThreadId;
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [props.messages, props.streamingText]);
   useEffect(() => { setThreadManagerOpen(false); }, [props.persona.id]);
+
+  // 端末内モデルの読み込み中だけ、経過秒数の表示を1秒ごとに更新する
+  // (進捗率は取得できないため、正直に出せるのは経過時間だけ — docs/gemma4_on_device.md §15.4)。
+  const localModelLoading = props.localModelStatus?.status === "loading";
+  const localModelLoadingStartedAt = props.localModelStatus?.startedAt;
+  useEffect(() => {
+    if (!localModelLoading) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [localModelLoading, localModelLoadingStartedAt]);
 
   // 打ちかけの言葉をスレッドごとに端末へ自動保存 (事故で閉じても消えない)
   useEffect(() => {
@@ -148,8 +168,19 @@ export function ChatView(props: ChatViewProps) {
         <div ref={bottomRef} />
       </div>
       <footer className="composer-wrap">
+        {localModelLoading && (
+          <div className="chat-status warning" role="status" aria-live="polite">
+            {formatLoadingElapsedMessage(localModelLoadingStartedAt ?? now, now)}
+          </div>
+        )}
+        {props.localModelStatus?.status === "error" && (
+          <div className="chat-status error" role="alert" aria-live="assertive">
+            <span>端末内モデルの読み込みに失敗しました：{props.localModelStatus.error ?? "不明なエラー"}</span>
+            <button type="button" className="text-button" onClick={props.onRetryLocalModel}>もう一度試す</button>
+          </div>
+        )}
         <div className="conversation-actions">
-          <button className="text-button" onClick={() => void props.onRegenerate()} disabled={props.sending || props.messages.every((message) => message.role !== "assistant")}>最後の返答を再生成</button>
+          <button className="text-button" onClick={() => void props.onRegenerate()} disabled={props.sending || localModelLoading || props.messages.every((message) => message.role !== "assistant")}>最後の返答を再生成</button>
         </div>
         <form className="composer" onSubmit={(event) => void submit(event)}>
           <textarea
@@ -159,10 +190,10 @@ export function ChatView(props: ChatViewProps) {
             onKeyDown={keyDown}
             placeholder={`${props.persona.name}に話しかける`}
             rows={1}
-            disabled={props.sending || !props.activeThreadId}
+            disabled={props.sending || localModelLoading || !props.activeThreadId}
             aria-label="メッセージ"
           />
-          <button className="send-button" disabled={!draft.trim() || props.sending || !props.activeThreadId} aria-label="送信">送る</button>
+          <button className="send-button" disabled={!draft.trim() || props.sending || localModelLoading || !props.activeThreadId} aria-label="送信">送る</button>
         </form>
       </footer>
       {threadManagerOpen && <ThreadManagerDialog threads={props.threads} busy={props.sending} onClose={() => setThreadManagerOpen(false)} onDelete={props.onDeleteThreads} />}

@@ -39,7 +39,8 @@ interface ChatViewProps {
   onCreateThread(): void;
   onDeleteThreads(ids: string[]): Promise<boolean>;
   onSend(text: string): Promise<boolean>;
-  onEdit(message: ChatMessage, content: string): Promise<void>;
+  onEdit(message: ChatMessage, content: string): Promise<boolean>;
+  onReplyAgain(message: ChatMessage): Promise<void>;
   onDeleteMessage(message: ChatMessage): Promise<void>;
   onRegenerate(): Promise<void>;
   onLoadOlder(): Promise<void>;
@@ -52,7 +53,29 @@ function time(value: number): string {
   return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(value);
 }
 
-function MessageBubble({ message, persona, settings, disabled, onEdit, onDelete, onReadImage }: { message: ChatMessage; persona: Persona; settings: AppSettings; disabled: boolean; onEdit(message: ChatMessage, content: string): Promise<void>; onDelete(message: ChatMessage): Promise<void>; onReadImage: ReadImage }) {
+const EDITOR_MAX_ROWS = 14;
+
+export function MessageEditor({ content, disabled, onSave, onCancel }: { content: string; disabled: boolean; onSave(content: string): Promise<boolean>; onCancel(): void }) {
+  const [draft, setDraft] = useState(content);
+  const [saving, setSaving] = useState(false);
+  const next = draft.trim();
+  const save = async () => {
+    setSaving(true);
+    if (!await onSave(next)) setSaving(false);
+  };
+  return (
+    <div className="message-editor">
+      <textarea aria-label="発言を編集" value={draft} rows={Math.min(EDITOR_MAX_ROWS, content.split("\n").length + 1)} onChange={(event) => setDraft(event.target.value)} autoFocus />
+      <div className="form-actions">
+        <button className="button" onClick={() => void save()} disabled={disabled || saving || !next || next === content}>保存</button>
+        <button className="button secondary" onClick={onCancel} disabled={saving}>やめる</button>
+      </div>
+    </div>
+  );
+}
+
+export function MessageBubble({ message, persona, settings, disabled, replyDisabled, onEdit, onReplyAgain, onDelete, onReadImage }: { message: ChatMessage; persona: Persona; settings: AppSettings; disabled: boolean; replyDisabled: boolean; onEdit(message: ChatMessage, content: string): Promise<boolean>; onReplyAgain(message: ChatMessage): Promise<void>; onDelete(message: ChatMessage): Promise<void>; onReadImage: ReadImage }) {
+  const [editing, setEditing] = useState(false);
   const display = rowDisplay(message);
   if (display === "hidden") return null;
   if (display === "notice") {
@@ -68,9 +91,10 @@ function MessageBubble({ message, persona, settings, disabled, onEdit, onDelete,
   }
   const userName = settings.userName.trim() || "あなた";
   const label = message.role === "user" ? userName : persona.name;
-  const edit = () => {
-    const next = window.prompt("メッセージを編集", message.content);
-    if (next !== null && next.trim() && next !== message.content) void onEdit(message, next.trim());
+  const save = async (content: string) => {
+    const saved = await onEdit(message, content);
+    if (saved) setEditing(false);
+    return saved;
   };
   return (
     <article className={`message-row ${message.role}`}>
@@ -81,14 +105,17 @@ function MessageBubble({ message, persona, settings, disabled, onEdit, onDelete,
             ? <img src={settings.userAvatarDataUrl} alt="" />
             : label.slice(0, 1)}
       </div>
-      <div className="message-body">
+      <div className={editing ? "message-body editing" : "message-body"}>
         <div className="message-meta"><strong>{label}</strong><time>{time(message.createdAt)}</time>{message.editedAt && <span>編集済み</span>}</div>
-        {message.content.trim() && <div className="message-content">{message.content}</div>}
+        {editing
+          ? <MessageEditor content={message.content} disabled={disabled} onSave={save} onCancel={() => setEditing(false)} />
+          : message.content.trim() && <div className="message-content">{message.content}</div>}
         <MessageImages message={message} onReadImage={onReadImage} />
-        <div className="message-actions">
-          <button className="text-button compact" onClick={edit} disabled={disabled}>編集</button>
+        {!editing && <div className="message-actions">
+          <button className="text-button compact" onClick={() => setEditing(true)} disabled={disabled}>編集</button>
+          {message.role === "user" && <button className="text-button compact" onClick={() => void onReplyAgain(message)} disabled={replyDisabled}>ここから話し直す</button>}
           <button className="text-button compact danger" onClick={() => void onDelete(message)} disabled={disabled}>削除</button>
-        </div>
+        </div>}
       </div>
     </article>
   );
@@ -213,7 +240,7 @@ export function ChatView(props: ChatViewProps) {
         {props.messages.length === 0 && !props.hasOlder && !props.streamingText && (
           <div className="empty-state"><span>ここから始まる</span><h2>{props.persona.name}との新しい時間</h2><p>会話も記憶も、この端末の中に保存されます。</p></div>
         )}
-        {props.messages.map((message) => <MessageBubble key={message.id} message={message} persona={props.persona} settings={props.settings} disabled={props.sending} onEdit={props.onEdit} onDelete={props.onDeleteMessage} onReadImage={props.onReadImage} />)}
+        {props.messages.map((message) => <MessageBubble key={message.id} message={message} persona={props.persona} settings={props.settings} disabled={props.sending} replyDisabled={props.sending || localModelLoading} onEdit={props.onEdit} onReplyAgain={props.onReplyAgain} onDelete={props.onDeleteMessage} onReadImage={props.onReadImage} />)}
         {props.streamingText && (
           <article className="message-row assistant streaming">
             <div className="message-avatar" aria-hidden="true">{props.persona.avatarDataUrl ? <img src={props.persona.avatarDataUrl} alt="" /> : props.persona.name.slice(0, 1)}</div>

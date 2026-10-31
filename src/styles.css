@@ -107,7 +107,10 @@ textarea { resize: vertical; line-height: 1.6; }
 .message-avatar { width: 34px; height: 34px; border-radius: 50%; font-size: 12px; }
 .message-row.user .message-avatar { background: var(--surface-3); color: var(--text); border-color: var(--line); }
 .message-body { max-width: min(78%, 680px); }
-.message-actions { display: flex; gap: 12px; }
+.message-body.editing { flex: 1; }
+.message-editor { display: grid; gap: 8px; }
+.message-editor .button { padding: 7px 14px; font-size: 13px; }
+.message-actions { display: flex; flex-wrap: wrap; gap: 0 12px; }
 .message-meta { display: flex; align-items: center; gap: 8px; margin: 0 3px 6px; color: var(--muted); font-size: 11px; }
 .message-meta strong { color: var(--text); font-size: 12px; }
 .message-row.user .message-meta { justify-content: flex-end; }

@@ -402,17 +402,15 @@ export default function App() {
     }
   };
 
-  const editMessage = async (message: ChatMessage, content: string) => {
+  const editMessage = async (message: ChatMessage, content: string): Promise<boolean> => {
     try {
-      if (message.role === "user" && await hasRowsAfter(repository, message)) {
-        if (!window.confirm("この発言より後の会話はすべて削除されます。元に戻せません。続けますか？")) return;
-        await deleteRowsAfter(repository, message);
-      }
       await repository.putMessage(await withoutPassphrase(repository, { ...message, content, editedAt: Date.now() }));
       await loadThread(message.threadId);
+      return true;
     } catch (error) {
       console.error("[SAIVerse Lite][chat] Failed to edit message", { messageId: message.id, error });
       setNotice(`発言を編集できませんでした: ${errorMessage(error)}`);
+      return false;
     }
   };
 
@@ -428,6 +426,22 @@ export default function App() {
       console.error("[SAIVerse Lite][chat] Failed to delete message", { messageId: message.id, error });
       setNotice(`発言を削除できませんでした: ${errorMessage(error)}`);
     }
+  };
+
+  const replyAgainFrom = async (message: ChatMessage) => {
+    if (sending) return;
+    try {
+      if (await hasRowsAfter(repository, message)) {
+        if (!window.confirm("この発言より後の会話をすべて削除して、この発言への返答を作り直します。削除した会話は元に戻せません。続けますか？")) return;
+        await deleteRowsAfter(repository, message);
+        await loadThread(message.threadId);
+      }
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Failed to delete the rows after a message", { messageId: message.id, error });
+      setNotice(`この発言より後の会話を削除できませんでした: ${errorMessage(error)}`);
+      return;
+    }
+    await regenerate();
   };
 
   const regenerate = async () => {
@@ -521,7 +535,7 @@ export default function App() {
 
   const content = (() => {
     if (!selectedPersona) return <div className="empty-state"><h2>パートナーを読み込めませんでした</h2></div>;
-    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} hasOlder={hasOlder} importing={importing} importBusy={dataBusy} metabolismText={metabolismText[selectedPersona.id] ?? ""} metabolismError={selectedSession?.metabolismError ?? null} metabolismNotice={selectedSession?.metabolismNotice ?? null} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} localModelStatus={localModelStatus} onRetryLocalModel={retryLocalModel} onSelectThread={(id) => void selectThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onDeleteMessage={deleteMessage} onRegenerate={regenerate} onLoadOlder={loadOlderMessages} onResumeImport={() => setResumingImport(true)} onDismissMetabolismNotice={() => void dismissMetabolismNotice()} onReadImage={readImage} />;
+    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} hasOlder={hasOlder} importing={importing} importBusy={dataBusy} metabolismText={metabolismText[selectedPersona.id] ?? ""} metabolismError={selectedSession?.metabolismError ?? null} metabolismNotice={selectedSession?.metabolismNotice ?? null} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} localModelStatus={localModelStatus} onRetryLocalModel={retryLocalModel} onSelectThread={(id) => void selectThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onReplyAgain={replyAgainFrom} onDeleteMessage={deleteMessage} onRegenerate={regenerate} onLoadOlder={loadOlderMessages} onResumeImport={() => setResumingImport(true)} onDismissMetabolismNotice={() => void dismissMetabolismNotice()} onReadImage={readImage} />;
     if (view === "personas") return <PersonaView personas={personas} providers={providers} selectedId={selectedPersona.id} onSelect={(id) => void selectPersona(id)} onSave={savePersona} onDelete={deletePersona} />;
     if (view === "memory") {
       return importing

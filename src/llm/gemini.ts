@@ -62,6 +62,13 @@ function toolConfig(request: ProviderRequest): Record<string, unknown>[] {
   }];
 }
 
+function toolFields(request: ProviderRequest): Record<string, unknown> {
+  return {
+    tools: toolConfig(request),
+    toolConfig: { functionCallingConfig: { mode: request.toolChoice === "none" ? "NONE" : "AUTO" } },
+  };
+}
+
 function approxTokens(systemPrompt: string, contents: GeminiContent[]): number {
   return Math.floor((systemPrompt.length + JSON.stringify(contents).length) / 4);
 }
@@ -85,7 +92,7 @@ export class GeminiProvider implements LlmProvider {
           displayName: `saiverse-lite-${Date.now()}`,
           systemInstruction: { parts: [{ text: request.systemPrompt }] },
           contents: prefix,
-          tools: toolConfig(request),
+          ...toolFields(request),
           ttl: "300s",
         }),
         signal: request.signal ?? null,
@@ -118,13 +125,11 @@ export class GeminiProvider implements LlmProvider {
     const contents = geminiMessages(request.messages, request.memoryContext);
     const prefix = contents.slice(0, -1);
     const cacheName = await this.createCache(request, prefix);
-    const body: Record<string, unknown> = {
-      contents: cacheName ? contents.slice(-1) : contents,
-      tools: toolConfig(request),
-      toolConfig: { functionCallingConfig: { mode: request.toolChoice === "none" ? "NONE" : "AUTO" } },
-    };
-    if (cacheName) body.cachedContent = cacheName;
-    else body.systemInstruction = { parts: [{ text: request.systemPrompt }] };
+    // A request naming a cache is refused if it also sets system_instruction,
+    // tools or tool_config: those live in the cache.
+    const body: Record<string, unknown> = cacheName
+      ? { contents: contents.slice(-1), cachedContent: cacheName }
+      : { contents, ...toolFields(request), systemInstruction: { parts: [{ text: request.systemPrompt }] } };
     try {
       const response = await fetchWithRetry(this.api(`models/${encodeURIComponent(request.model)}:streamGenerateContent?alt=sse`), {
         method: "POST",

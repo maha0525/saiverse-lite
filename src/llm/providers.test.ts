@@ -184,6 +184,8 @@ describe("provider transports", () => {
     ]);
     const cacheBody = JSON.parse(String(calls[0]?.init?.body)) as {
       tools: Array<{ functionDeclarations: Array<Record<string, unknown>> }>;
+      toolConfig: unknown;
+      systemInstruction: unknown;
     };
     const generateBody = JSON.parse(String(calls[1]?.init?.body)) as Record<string, unknown>;
     const expectedSchema = {
@@ -195,12 +197,28 @@ describe("provider transports", () => {
     const cacheDeclaration = cacheBody.tools[0]?.functionDeclarations[0];
     expect(cacheDeclaration?.parameters).toBeUndefined();
     expect(cacheDeclaration?.parametersJsonSchema).toEqual(expectedSchema);
-    const generateTools = generateBody.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>;
-    const generateDeclaration = generateTools[0]?.functionDeclarations[0];
-    expect(generateDeclaration?.parameters).toBeUndefined();
-    expect(generateDeclaration?.parametersJsonSchema).toEqual(expectedSchema);
+    expect(cacheBody.toolConfig).toEqual({ functionCallingConfig: { mode: "AUTO" } });
+    expect(cacheBody.systemInstruction).toBeDefined();
+    // The API answers 400 when a request naming a cache sets any of these.
     expect(generateBody.cachedContent).toBe("cachedContents/test");
+    expect(generateBody.tools).toBeUndefined();
+    expect(generateBody.toolConfig).toBeUndefined();
     expect(generateBody.systemInstruction).toBeUndefined();
+  });
+
+  it("keeps tools on the Gemini request when no cache is made", async () => {
+    let captured: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      captured = init;
+      return new Response(`data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }));
+    const provider = new GeminiProvider(config("gemini"));
+    for await (const _event of provider.stream(request([user("short")]))) { /* drain */ }
+    const body = JSON.parse(String(captured?.body)) as { tools: Array<{ functionDeclarations: Array<Record<string, unknown>> }>; toolConfig: unknown; systemInstruction: unknown; cachedContent?: unknown };
+    expect(body.cachedContent).toBeUndefined();
+    expect(body.tools[0]?.functionDeclarations[0]?.parametersJsonSchema).toBeDefined();
+    expect(body.toolConfig).toEqual({ functionCallingConfig: { mode: "AUTO" } });
+    expect(body.systemInstruction).toBeDefined();
   });
 
   it("sends no cache_control by default (cache is opt-in)", async () => {

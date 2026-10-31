@@ -1,4 +1,4 @@
-import type { ProviderKind } from "./domain";
+import type { ProviderConfig, ProviderKind } from "./domain";
 import { DEFAULT_LITERT_MODEL_ID } from "./llm/litertModels";
 
 /**
@@ -24,6 +24,25 @@ export const DEFAULT_CHAT_MODEL: Record<ProviderKind, string> = {
   // src/llm/litertModels.ts がモデル ID の唯一の正典。ここでは値を直書きしない。
   "litert-local": DEFAULT_LITERT_MODEL_ID,
 };
+
+/**
+ * The model for the Metabolism steps other than the sluice. Each entry repeats a
+ * model ID this file or apiKeyGuideData.ts already names; those files give no
+ * cheaper ID for any provider, only display names.
+ */
+export const DEFAULT_LIGHT_MODEL: Record<ProviderKind, string> = {
+  mock: DEFAULT_CHAT_MODEL.mock,
+  gemini: DEFAULT_CHAT_MODEL.gemini,
+  openai: DEFAULT_CHAT_MODEL.openai,
+  anthropic: DEFAULT_CHAT_MODEL.anthropic,
+  "openai-compatible": "",
+  "litert-local": DEFAULT_CHAT_MODEL["litert-local"],
+};
+
+/** A blank lightModel falls back to defaultModel; a custom endpoint may leave both to the persona. */
+export function resolveLightModel(config: ProviderConfig, personaModel: string): string {
+  return config.lightModel?.trim() || config.defaultModel || personaModel;
+}
 
 /** Image models have no per-persona override, so a blank one disables the tool. */
 export const DEFAULT_IMAGE_MODEL: Record<ProviderKind, string> = {

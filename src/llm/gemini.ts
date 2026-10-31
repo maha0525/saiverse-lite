@@ -1,14 +1,14 @@
 import type { ProviderConfig, ToolId } from "../domain";
 import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
-import { assertOk, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
+import { assertOk, type CompletionRequest, type CompletionResult, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
 
 interface GeminiPart { [key: string]: unknown }
 interface GeminiContent { role: "user" | "model"; parts: GeminiPart[] }
 
 function geminiMessages(messages: ProviderMessage[], memoryContext: string): GeminiContent[] {
   const result: GeminiContent[] = [];
-  if (memoryContext) result.push({ role: "user", parts: [{ text: `【長期記憶（システム提供）】\n${memoryContext}` }] });
+  if (memoryContext) result.push({ role: "user", parts: [{ text: memoryContext }] });
   // Calls saved before signatures were captured cannot be replayed as
   // functionCall parts - Gemini 3.x rejects the whole turn with 400. Rendering
   // those as plain text keeps existing threads usable and keeps the information,
@@ -67,6 +67,8 @@ function approxTokens(systemPrompt: string, contents: GeminiContent[]): number {
 }
 
 export class GeminiProvider implements LlmProvider {
+  readonly supportsStructuredOutput = true;
+
   constructor(readonly config: ProviderConfig) {}
 
   private headers(): HeadersInit { return { "content-type": "application/json", "x-goog-api-key": this.config.apiKey }; }
@@ -171,6 +173,39 @@ export class GeminiProvider implements LlmProvider {
     } finally {
       if (cacheName) await this.deleteCache(cacheName);
     }
+  }
+
+  async complete(request: CompletionRequest): Promise<CompletionResult> {
+    const generationConfig: Record<string, unknown> = {};
+    if (request.maxOutputTokens !== undefined) generationConfig.maxOutputTokens = request.maxOutputTokens;
+    if (request.responseSchema) {
+      generationConfig.responseMimeType = "application/json";
+      // Full JSON Schema, as parametersJsonSchema is for tools.
+      generationConfig.responseJsonSchema = request.responseSchema;
+    }
+    const body: Record<string, unknown> = {
+      contents: geminiMessages(request.messages, request.memoryContext),
+      generationConfig,
+    };
+    if (request.systemPrompt) body.systemInstruction = { parts: [{ text: request.systemPrompt }] };
+    const response = await fetchWithRetry(this.api(`models/${encodeURIComponent(request.model)}:generateContent`), {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(body),
+      signal: request.signal ?? null,
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
+    await assertOk(response, this.config.label, request.model);
+    const payload = await response.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
+    };
+    const parts = payload.candidates?.[0]?.content?.parts ?? [];
+    return {
+      text: parts.filter((part) => !part.thought).map((part) => part.text ?? "").join(""),
+      inputTokens: Number(payload.usageMetadata?.promptTokenCount ?? 0),
+      outputTokens: Number(payload.usageMetadata?.candidatesTokenCount ?? 0),
+      cachedTokens: Number(payload.usageMetadata?.cachedContentTokenCount ?? 0),
+    };
   }
 
   async generateImage(prompt: string, signal?: AbortSignal, onRetry?: RetryNotice): Promise<ImageGenerationResult> {

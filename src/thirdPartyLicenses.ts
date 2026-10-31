@@ -4,8 +4,20 @@ import type { LegalDocument } from "./legal";
 
 export const THIRD_PARTY_LICENSES: LegalDocument = {
   title: "サードパーティライセンス",
-  version: "2026-07-15",
+  version: "2026-10-31",
   sections: [
+  {
+    "heading": "@litert-lm/core 0.15.0 — Apache-2.0",
+    "body": "https://github.com/google-ai-edge/LiteRT-LM#readme"
+  },
+  {
+    "heading": "@litertjs/wasm-utils 2.5.3 — Apache-2.0",
+    "body": "https://github.com/google-ai-edge/LiteRT#readme"
+  },
+  {
+    "heading": "@zip.js/zip.js 2.24.0 — BSD-3-Clause",
+    "body": "Copyright: Gildas Lormeau\nhttps://gildas-lormeau.github.io/zip.js"
+  },
   {
     "heading": "core-util-is 1.0.3 — MIT",
     "body": "Copyright: Isaac Z. Schlueter\nhttps://github.com/isaacs/core-util-is#readme"

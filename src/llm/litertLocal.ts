@@ -20,6 +20,8 @@ import { newId, type ProviderConfig, type ToolCall, type ToolId } from "../domai
 import { ensureEngine } from "./litertEngine";
 import { isLiteRtModelId } from "./litertModels";
 import type {
+  CompletionRequest,
+  CompletionResult,
   ImageGenerationResult,
   LlmProvider,
   ProviderEvent,
@@ -34,13 +36,13 @@ function isToolId(name: string): name is ToolId {
   return (KNOWN_TOOL_IDS as readonly string[]).includes(name);
 }
 
-// 固定 prefix (system prompt + 長期記憶) の組み立て方。
-// 既存 provider の意味論を踏襲する: system prompt を先頭に置き、長期記憶があれば
-// 「【長期記憶】」見出しを付けて後ろに続ける (OpenAI の streamChatCompletions と同じ並び —
-// role: "system" のメッセージを2本に分けて preface へ積む)。
+// 固定 prefix (system prompt + Chronicle) の組み立て方。
+// 他の provider は Chronicle を role=user の一通で送るが、ここでは従来どおり preface の
+// system に積む。preface に user を置いたときの Gemma のチャットテンプレートの挙動は未確認。
 function prefaceMessages(request: ProviderRequest): LiteRtMessage[] {
-  const messages: LiteRtMessage[] = [{ role: "system", content: request.systemPrompt }];
-  if (request.memoryContext) messages.push({ role: "system", content: `【長期記憶】\n${request.memoryContext}` });
+  const messages: LiteRtMessage[] = [];
+  if (request.systemPrompt) messages.push({ role: "system", content: request.systemPrompt });
+  if (request.memoryContext) messages.push({ role: "system", content: request.memoryContext });
   return messages;
 }
 
@@ -131,7 +133,31 @@ function* toolCallEvents(toolCalls: LiteRtToolCall[] | undefined): Generator<Pro
 }
 
 export class LiteRtLocalProvider implements LlmProvider {
+  readonly supportsStructuredOutput = false;
+
   constructor(readonly config: ProviderConfig) {}
+
+  async complete(request: CompletionRequest): Promise<CompletionResult> {
+    if (request.responseSchema) throw new Error("端末内モデル（Gemma 4）は構造化出力に対応していません。");
+    const result: CompletionResult = { text: "", inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+    const stream = this.stream({
+      model: request.model,
+      systemPrompt: request.systemPrompt,
+      memoryContext: request.memoryContext,
+      messages: request.messages,
+      tools: [],
+      toolChoice: "none",
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+    for await (const event of stream) {
+      if (event.type === "text") result.text += event.text;
+      else if (event.type === "usage") {
+        result.inputTokens = event.inputTokens;
+        result.outputTokens = event.outputTokens;
+      }
+    }
+    return result;
+  }
 
   async *stream(request: ProviderRequest): AsyncGenerator<ProviderEvent> {
     if (!isLiteRtModelId(request.model)) {

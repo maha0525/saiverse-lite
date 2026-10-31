@@ -27,6 +27,9 @@ import type { ConversationImportTarget } from "./components/OfficialImportDialog
 import { LEGAL_VERSION } from "./legal";
 import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
+import { resolveInitialAnchor } from "./memory/window";
+import { importPersonaPack, type PackImportProgress } from "./pack/importPack";
+import { OpfsPackStore } from "./pack/packStore";
 import { CATEGORY_CORE, epochSeconds, liveCoreMemories, softDeleteCoreMemory } from "./pageRecords";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
@@ -37,6 +40,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 const repository = new IndexedDbRepository();
+const packStore = new OpfsPackStore();
 const chatService = new ChatService(repository);
 
 function downloadJson(filename: string, value: unknown): void {
@@ -144,7 +148,7 @@ export default function App() {
     await loadThread(nextThreadId);
   }, [loadThread]);
 
-  const refreshBase = useCallback(async (preferredPersonaId?: string) => {
+  const refreshBase = useCallback(async (preferredPersonaId?: string, preferredThreadId?: string) => {
     const [nextPersonas, nextProviders, nextSettings] = await Promise.all([
       repository.listPersonas(), repository.listProviders(), repository.getSettings(),
     ]);
@@ -155,7 +159,7 @@ export default function App() {
       ? preferredPersonaId
       : nextPersonas[0]?.id ?? "";
     setSelectedPersonaId(nextPersonaId);
-    if (nextPersonaId) await loadPersonaData(nextPersonaId);
+    if (nextPersonaId) await loadPersonaData(nextPersonaId, preferredThreadId);
   }, [loadPersonaData]);
 
   useEffect(() => {
@@ -366,6 +370,7 @@ export default function App() {
   const deletePersona = async (id: string) => {
     if (!window.confirm("このパートナーと端末内の会話・記憶を削除しますか？")) return;
     await repository.deletePersona(id);
+    await packStore.delete(id).catch((error: unknown) => console.warn("[SAIVerse Lite][pack] stored pack could not be deleted", { personaId: id, error }));
     await refreshBase();
   };
   const createMemory = async (content: string) => {
@@ -390,6 +395,26 @@ export default function App() {
     downloadJson(`${selectedPersona.id}_saiverse-memory.json`, value);
   };
 
+  const importPack = async (file: File, providerId: string, model: string, onProgress: (progress: PackImportProgress) => void) => {
+    setDataBusy(true);
+    setNotice("");
+    try {
+      const result = await importPersonaPack(file, repository, packStore, { providerId, model, resolveInitialAnchor }, onProgress);
+      await refreshBase(result.personaId, result.activeThreadId ?? undefined);
+      return result;
+    } catch (error) {
+      // A stopped import leaves its persona in the list.
+      await refreshBase(selectedPersonaIdRef.current);
+      throw error;
+    } finally {
+      setDataBusy(false);
+    }
+  };
+  const listInterruptedImports = async () => {
+    const sessions = await Promise.all(personas.map((persona) => repository.getSession(persona.id)));
+    return personas.filter((_, index) => sessions[index]?.importState === "importing").map((persona) => persona.name);
+  };
+
   const runDataAction = async (action: () => Promise<string>) => {
     setDataBusy(true); setNotice("");
     try { setNotice(await action()); } catch (error) { console.error("[SAIVerse Lite][data] action failed", error); setNotice(`処理できませんでした: ${errorMessage(error)}`); }
@@ -403,6 +428,8 @@ export default function App() {
     if (view === "memory") return <MemoryView persona={selectedPersona} memories={memories} onCreate={createMemory} onEdit={editMemory} onDelete={deleteMemory} />;
     if (view === "data") return <DataView
       persona={selectedPersona} personas={personas} providers={providers} busy={dataBusy} notice={notice}
+      onImportPack={importPack}
+      listInterruptedImports={listInterruptedImports}
       onExportPersona={() => downloadJson(`${selectedPersona.id}_persona.json`, exportPersona(selectedPersona))}
       onExportMemory={exportCurrentMemory}
       onExportBackup={() => runDataAction(async () => { downloadJson("saiverse-lite-backup.json", exportFullBackup(await repository.exportSnapshot())); return "フルバックアップを書き出しました。"; })}

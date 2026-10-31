@@ -112,6 +112,20 @@ export interface FragmentRecord {
 
 export type PersonaImportState = "ready" | "importing";
 
+/** One Memopedia page in the auto recall ledger. Mirrors `_LedgerItem.stale_turns` of the body's sea/auto_recall.py. */
+export interface RecallLedgerItem {
+  pageId: string;
+  staleTurns: number;
+  /** The user row that surfaced the page, so regenerating that same turn surfaces it again. */
+  messageId: string;
+}
+
+/** A Chronicle entry whose entity extraction failed. Mirrors the body's `entity_extraction_backlog` row. */
+export interface ExtractionBacklogItem {
+  entryId: string;
+  attempts: number;
+}
+
 export interface PersonaSession {
   personaId: string;
   activeThreadId: string | null;
@@ -122,6 +136,10 @@ export interface PersonaSession {
   headUpdatedAt: number | null;
   metabolismError: string | null;
   importState: PersonaImportState;
+  /** Keyed by thread id. Absent until the first recall. */
+  recallLedger?: Record<string, RecallLedgerItem[]>;
+  /** Absent until the first extraction failure. */
+  extractionBacklog?: ExtractionBacklogItem[];
 }
 
 export type MemoryKind = "note";
@@ -267,8 +285,14 @@ export function createDefaultPersona(now = Date.now()): Persona {
     avatarDataUrl: null,
     providerId: "provider_mock",
     model: "mock-friendly",
-    toolIds: ["memory_recall", "image_generate"],
+    toolIds: ["memory_recall", "memory_read", "memory_write", "image_generate"],
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/** Personas saved before memory_read and memory_write existed get them when they are loaded for a response. */
+export function withMemoryTools(persona: Persona): Persona {
+  const missing = (["memory_read", "memory_write"] as const).filter((id) => !persona.toolIds.includes(id));
+  return missing.length === 0 ? persona : { ...persona, toolIds: [...persona.toolIds, ...missing] };
 }

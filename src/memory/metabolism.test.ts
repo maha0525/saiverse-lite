@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService, type MetabolismState } from "../chatService";
-import { createChatMessage, createDefaultPersona, handyToolRecord, newId, type ChatMessage, type ConversationThread, type Persona } from "../domain";
+import { createChatMessage, createDefaultPersona, createDefaultProvider, handyToolRecord, newId, type ChatMessage, type ConversationThread, type Persona } from "../domain";
 import { MockProvider } from "../llm/mock";
 import type { CompletionRequest, CompletionResult, ProviderRequest } from "../llm/types";
 import { CATEGORY_CHRONICLE, CATEGORY_CORE, epochSeconds, liveCoreMemories } from "../pageRecords";
@@ -9,7 +9,7 @@ import { retryExtractionBacklog } from "./entities";
 import { chronicleEntries, coveredMessageIds } from "./entries";
 import { planEviction } from "./eviction";
 import { runMetabolism } from "./metabolism";
-import { prepareSession } from "./session";
+import { activateThread, prepareSession } from "./session";
 import { buildSluicePrompt, parseSluiceResult } from "./sluice";
 import { CHRONICLE_UNIT_CHARS, METABOLISM_TARGET_CHARS, readWindow, resolveInitialAnchor } from "./window";
 
@@ -365,6 +365,83 @@ describe("the head", () => {
     const session = (await f.repository.getSession(f.persona.id))!;
     expect(session.activeThreadId).toBe(other.id);
     expect(calls.streams[0]!.messages.map((message) => message.content).join("\n")).not.toContain("発言0");
+  });
+});
+
+describe("activateThread", () => {
+  it("settles the anchor of the opened thread, so the next run sees it", async () => {
+    const f = await fixture();
+    const rows = await seed(f, 4, 10);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const other: ConversationThread = { ...f.thread, id: newId("thread"), title: "別の会話" };
+    await f.repository.putThread(other);
+    const otherRow = row(other, 900, "user", "別の話");
+    await f.repository.writePersonaRecords(f.persona.id, { messages: [otherRow] });
+
+    const opened = await activateThread(f.repository, f.persona, other.id);
+    expect(opened).toMatchObject({ activeThreadId: other.id, anchorMessageId: otherRow.id });
+
+    const back = await activateThread(f.repository, f.persona, f.thread.id);
+    expect(back).toMatchObject({ activeThreadId: f.thread.id, anchorMessageId: rows[0]!.id });
+  });
+
+  it("leaves a new empty thread without an anchor until its first message", async () => {
+    const f = await fixture();
+    await seed(f, 4, 10);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const fresh: ConversationThread = { ...f.thread, id: newId("thread"), title: "新しい会話" };
+    await f.repository.putThread(fresh);
+    expect(await activateThread(f.repository, f.persona, fresh.id)).toMatchObject({ activeThreadId: fresh.id, anchorMessageId: null });
+    spyProvider();
+    await new ChatService(f.repository).send(f.persona, fresh, "はじめまして");
+    const session = (await f.repository.getSession(f.persona.id))!;
+    expect((await f.repository.getMessage(session.anchorMessageId!))?.threadId).toBe(fresh.id);
+  });
+
+  it("keeps the head when the thread is the one already open", async () => {
+    const f = await fixture();
+    await seed(f, 4, 10);
+    const { session } = await prepareSession(f.repository, f.persona, f.thread.id);
+    expect((await activateThread(f.repository, f.persona, f.thread.id)).passphrase).toBe(session.passphrase);
+  });
+
+  it("does not touch the session of a persona still importing", async () => {
+    const f = await fixture();
+    await seed(f, 4, 10);
+    await f.repository.updateSession(f.persona.id, (session) => ({ ...session, importState: "importing" }));
+    const opened = await activateThread(f.repository, f.persona, f.thread.id);
+    expect(opened).toMatchObject({ activeThreadId: null, anchorMessageId: null, headText: null });
+  });
+
+  it("does not carry an anchor to another thread when the thread changes during a run", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const other: ConversationThread = { ...f.thread, id: newId("thread"), title: "別の会話" };
+    await f.repository.putThread(other);
+    const otherRow = row(other, 900, "user", "別の話");
+    await f.repository.writePersonaRecords(f.persona.id, { messages: [otherRow] });
+    spyProvider();
+    const provider = new MockProvider(createDefaultProvider());
+    let switched = false;
+    const outcome = await runMetabolism({
+      repository: f.repository,
+      persona: f.persona,
+      provider,
+      chatModel: "mock-friendly",
+      lightModel: "mock-friendly",
+      onStage: () => {
+        if (switched) return;
+        switched = true;
+        void activateThread(f.repository, f.persona, other.id);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(outcome).toBe("ok");
+    const session = (await f.repository.getSession(f.persona.id))!;
+    expect(session.activeThreadId).toBe(other.id);
+    expect(session.anchorMessageId).toBe(otherRow.id);
+    expect(chronicleEntries(await f.repository.listPages(f.persona.id, CATEGORY_CHRONICLE)).length).toBeGreaterThan(0);
   });
 });
 

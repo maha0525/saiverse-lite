@@ -10,7 +10,7 @@ import {
   type ToolCall,
   type ToolId,
 } from "./domain";
-import { ChatOperationError, type ChatOperation } from "./chatErrors";
+import { ChatOperationError, PersonaImportingError, type ChatOperation } from "./chatErrors";
 import { createProvider } from "./llm";
 import type { RetryAttempt, RetryNotice } from "./llm/retry";
 import type { LlmProvider, ProviderMessage } from "./llm/types";
@@ -139,11 +139,11 @@ export class ChatService {
     callbacks: ChatCallbacks = {},
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
+    await this.assertNotImporting(persona.id);
     const now = Date.now();
     const pulseId = newId("pulse");
     const created: string[] = [];
     try {
-      await this.assertNotImporting(persona.id);
       const userMessage = createChatMessage({
         id: newId("message"),
         threadId: thread.id,
@@ -170,14 +170,15 @@ export class ChatService {
     callbacks: ChatCallbacks = {},
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
+    await this.assertNotImporting(persona.id);
     const thread = await this.repository.getThread(threadId);
     if (!thread) throw new Error("会話スレッドが見つかりません");
     const created: string[] = [];
     const removed: ChatMessage[] = [];
     try {
-      await this.assertNotImporting(persona.id);
       const recent = await this.repository.readThreadMessages(threadId, { direction: "backward", limit: REGENERATE_LOOKBACK });
-      const last = recent.find((message) => message.role === "assistant");
+      // A blank row is a tool turn the screen does not show; it is not the response the user is replacing.
+      const last = recent.find((message) => message.role === "assistant" && message.content.trim() !== "");
       // The tool rows belong to the response being replaced.
       if (last) removed.push(...(last.pulseId ? recent.filter((message) => message.pulseId === last.pulseId && message.role !== "user") : [last]));
       for (const message of removed) await this.repository.deleteMessage(message.id);
@@ -188,9 +189,7 @@ export class ChatService {
   }
 
   private async assertNotImporting(personaId: string): Promise<void> {
-    if ((await this.repository.getSession(personaId))?.importState === "importing") {
-      throw new Error("このペルソナは取り込みの途中です。取り込みが終わると話せます");
-    }
+    if ((await this.repository.getSession(personaId))?.importState === "importing") throw new PersonaImportingError();
   }
 
   private async runMetabolismFor(run: MetabolismRun): Promise<MetabolismOutcome> {

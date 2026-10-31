@@ -1,4 +1,4 @@
-import type { FragmentRecord, PageRecord } from "../domain";
+import { randomId, type FragmentRecord, type PageRecord } from "../domain";
 import { CATEGORY_CHRONICLE, CATEGORY_CORE, epochSeconds } from "../pageRecords";
 
 // The Memopedia part of body: sai_memory/memopedia/{storage,core}.py.
@@ -30,7 +30,7 @@ export function memopediaPage(
   const now = epochSeconds(nowMs);
   return {
     ...fields,
-    id: crypto.randomUUID(),
+    id: randomId(),
     personaId,
     createdAt: now,
     updatedAt: now,
@@ -51,7 +51,7 @@ export function fragmentRecord(
   fields: Pick<FragmentRecord, "content" | "entityId" | "chronicleEntryId" | "sourceDate">,
   nowMs = Date.now(),
 ): FragmentRecord {
-  return { ...fields, id: crypto.randomUUID(), personaId, vividness: "vivid", createdAt: epochSeconds(nowMs), source: null };
+  return { ...fields, id: randomId(), personaId, vividness: "vivid", createdAt: epochSeconds(nowMs), source: null };
 }
 
 /** body: core.py `_compose_page_body`. */

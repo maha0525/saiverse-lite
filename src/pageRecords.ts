@@ -1,4 +1,4 @@
-import type { PageRecord, PersonaSession } from "./domain";
+import { randomId, type PageRecord, type PersonaSession } from "./domain";
 
 export const ROOT_CORE_ID = "root_core";
 export const ROOT_CHRONICLE_ID = "root_chronicle";
@@ -129,7 +129,7 @@ export function buildCoreMemoryPages(
     nextCoreId += 1;
     const createdAt = draft.createdAt ?? nowSeconds;
     const page: PageRecord = {
-      id: draft.id ?? crypto.randomUUID(),
+      id: draft.id ?? randomId(),
       personaId,
       parentId: ROOT_CORE_ID,
       title: `コア記憶 c:${core}`,

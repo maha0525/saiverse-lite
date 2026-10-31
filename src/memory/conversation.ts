@@ -5,7 +5,8 @@ import { noticeMessage, redactPassphrase } from "./notices";
 
 const WEEKDAY_NAMES = ["日", "月", "火", "水", "木", "金", "土"];
 
-function imageEntries(metadata: Record<string, unknown>): Array<Record<string, unknown>> {
+/** The image items of a row: `metadata.media` of type image, then `metadata.images`, without repeats. */
+export function imageEntries(metadata: Record<string, unknown>): Array<Record<string, unknown>> {
   const media = Array.isArray(metadata.media) ? metadata.media : [];
   const images = Array.isArray(metadata.images) ? metadata.images : [];
   const items = [
@@ -25,12 +26,16 @@ function imageEntries(metadata: Record<string, unknown>): Array<Record<string, u
   });
 }
 
+/** The text an image goes out as, and stands in for it when the file cannot be read. */
+export function imageLabel(item: Record<string, unknown>): string {
+  return `[画像: ${String(item.uri ?? item.path)}]`;
+}
+
 /** body: llm_clients/system_notice.py `system_notice_media_note`, fixed by the row so the same record sends the same text. */
 function imageNotes(metadata: Record<string, unknown>): string[] {
   return imageEntries(metadata).map((item) => {
-    const uri = String(item.uri ?? item.path);
     const summary = typeof item.summary === "string" ? item.summary.trim() : "";
-    return summary ? `[画像: ${uri}] ${summary}` : `[画像: ${uri}]`;
+    return summary ? `${imageLabel(item)} ${summary}` : imageLabel(item);
   });
 }
 

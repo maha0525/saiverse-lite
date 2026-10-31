@@ -1,4 +1,4 @@
-import type { ProviderConfig, ToolId } from "../domain";
+import { randomId, type ProviderConfig, type ToolId } from "../domain";
 import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
 import { assertOk, type CompletionRequest, type CompletionResult, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
@@ -151,7 +151,7 @@ export class GeminiProvider implements LlmProvider {
               yield {
                 type: "tool-call",
                 call: {
-                  id: `gemini_${crypto.randomUUID()}`,
+                  id: `gemini_${randomId()}`,
                   name: fn.name as ToolId,
                   arguments: typeof fn.args === "object" && fn.args !== null ? fn.args as Record<string, unknown> : {},
                   ...(typeof signature === "string" && signature ? { thoughtSignature: signature } : {}),

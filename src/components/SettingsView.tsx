@@ -84,7 +84,10 @@ export function SettingsView(props: SettingsViewProps) {
           {draft.kind !== "litert-local" && <label className="field"><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} required /></label>}
           {draft.kind === "litert-local"
             ? <p className="field-help">端末内モデル（Gemma 4）は画像を生成できません。</p>
-            : <label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /><small>会話に使うモデルはパートナーごとに選びます。パートナー画面の「モデルID」で変更してください。</small></label>}
+            : <>
+                <label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /><small>会話に使うモデルはパートナーごとに選びます。パートナー画面の「モデルID」で変更してください。</small></label>
+                <label className="field"><span>記憶の整理に使うモデル</span><input value={draft.lightModel ?? ""} onChange={(event) => setDraft({ ...draft, lightModel: event.target.value })} /><small>空なら会話のモデルを使います。</small></label>
+              </>}
           {draft.kind === "litert-local" && !isWebGpuSupported() && <p className="field-warning">この端末またはブラウザは対応していません。会話を始めると失敗する可能性があります。</p>}
           {draft.kind === "gemini" && <label className="toggle"><input type="checkbox" checked={draft.geminiAutoCache} onChange={(event) => setDraft({ ...draft, geminiAutoCache: event.target.checked })} /><span><strong>Gemini 自動キャッシュ</strong><small>create → generate → delete。短い入力は通常コールへ戻します。</small></span></label>}
           {draft.kind === "anthropic" && <label className="field"><span>プロンプトキャッシュ</span><select value={draft.anthropicCacheTtl ?? "none"} onChange={(event) => setDraft({ ...draft, anthropicCacheTtl: event.target.value as AnthropicCacheTtl })}>
@@ -103,8 +106,6 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
           <label className="field"><span>あなたの名前</span><input value={localSettings.userName} onChange={(event) => setLocalSettings({ ...localSettings, userName: event.target.value })} placeholder="未設定の場合は「あなた」と表示" /></label>
           <label className="field"><span>テーマ</span><select value={localSettings.theme} onChange={(event) => setLocalSettings({ ...localSettings, theme: event.target.value as AppSettings["theme"] })}><option value="system">端末に合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
-          <label className="field"><span>会話へ入れる直近メッセージ数</span><input type="number" min={4} max={200} value={localSettings.recentContextMessages} onChange={(event) => setLocalSettings({ ...localSettings, recentContextMessages: Number(event.target.value) })} /></label>
-          <p className="field-help">保存した記憶は固定されたシステムプロンプトの後、直近履歴の前に注入されます。ペルソナのツール定義は会話中に増減しません。</p>
           <button className="button" type="submit">アプリ設定を保存</button>
         </form>
         <div className="panel form-panel about-panel">

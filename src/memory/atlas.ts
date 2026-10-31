@@ -107,7 +107,7 @@ export async function readPage(repository: LiteRepository, personaId: string, re
     : readChronicle(repository, personaId, parsed.key);
 }
 
-function coreBudgetNote(pages: PageRecord[]): string {
+export function coreBudgetNote(pages: PageRecord[]): string {
   const total = coreMemoriesInOrder(pages).reduce((sum, page) => sum + page.content.length, 0);
   const over = total > CORE_MEMORY_CHAR_BUDGET ? "目安を超えています。整理を検討してください。" : "";
   return `現在 ${total.toLocaleString("en-US")} 字 / 目安 ${CORE_MEMORY_CHAR_BUDGET.toLocaleString("en-US")} 字。${over}`;
@@ -119,14 +119,21 @@ async function writeCoreNew(repository: LiteRepository, personaId: string, text:
   return `コア記憶 core:${coreMemoryId(page!)} に書きました（常時開の特殊ページです）。${note}head への反映は次の記憶整理（Metabolism）からです。`;
 }
 
+/** A scene is a copy of a real conversation, so it is never rewritten. */
+export async function replaceCoreMemory(repository: LiteRepository, personaId: string, id: number, text: string): Promise<"replaced" | "scene" | "missing"> {
+  const page = findCorePage(await repository.listPages(personaId, CATEGORY_CORE), id);
+  if (!page) return "missing";
+  if (page.metadata.kind === "scene") return "scene";
+  await repository.putPage({ ...page, content: text, updatedAt: epochSeconds(Date.now()) });
+  return "replaced";
+}
+
 async function writeCoreUpdate(repository: LiteRepository, personaId: string, key: string, text: string): Promise<string> {
   const id = positiveInt(key);
   if (id === null) return `コア記憶の参照が不正です: core:${key}`;
-  const pages = await repository.listPages(personaId, CATEGORY_CORE);
-  const page = findCorePage(pages, id);
-  if (page?.metadata.kind === "scene") return `コア記憶 core:${id} は場面の記憶 (実会話の写し) なので書き換えの対象外です。`;
-  if (!page) return `コア記憶が見つかりません: core:${id}`;
-  await repository.putPage({ ...page, content: text, updatedAt: epochSeconds(Date.now()) });
+  const result = await replaceCoreMemory(repository, personaId, id, text);
+  if (result === "scene") return `コア記憶 core:${id} は場面の記憶 (実会話の写し) なので書き換えの対象外です。`;
+  if (result === "missing") return `コア記憶が見つかりません: core:${id}`;
   const note = coreBudgetNote(await repository.listPages(personaId, CATEGORY_CORE));
   return `コア記憶 core:${id} を上書きしました。${note}head への反映は次の記憶整理（Metabolism）からです。`;
 }

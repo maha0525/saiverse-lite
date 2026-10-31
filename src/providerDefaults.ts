@@ -39,9 +39,9 @@ export const DEFAULT_LIGHT_MODEL: Record<ProviderKind, string> = {
   "litert-local": DEFAULT_CHAT_MODEL["litert-local"],
 };
 
-/** A blank lightModel falls back to defaultModel; a custom endpoint may leave both to the persona. */
+/** A blank lightModel means the model the persona talks with, which is what the settings screen promises. */
 export function resolveLightModel(config: ProviderConfig, personaModel: string): string {
-  return config.lightModel?.trim() || config.defaultModel || personaModel;
+  return config.lightModel?.trim() || personaModel || config.defaultModel;
 }
 
 /** Image models have no per-persona override, so a blank one disables the tool. */

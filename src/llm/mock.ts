@@ -1,4 +1,4 @@
-import type { ProviderConfig } from "../domain";
+import { randomId, type ProviderConfig } from "../domain";
 import type { CompletionRequest, CompletionResult, ImageGenerationResult, LlmProvider, ProviderEvent, ProviderRequest } from "./types";
 
 const MOCK_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -22,7 +22,7 @@ export class MockProvider implements LlmProvider {
     if (!toolResult && request.toolChoice === "auto" && last?.content.includes("思い出して")) {
       yield {
         type: "tool-call",
-        call: { id: `mock_call_${crypto.randomUUID()}`, name: "memory_recall", arguments: { query: last.content.replace("思い出して", "").trim() } },
+        call: { id: `mock_call_${randomId()}`, name: "memory_recall", arguments: { query: last.content.replace("思い出して", "").trim() } },
       };
       return;
     }

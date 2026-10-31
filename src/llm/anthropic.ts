@@ -1,4 +1,4 @@
-import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import { randomId, type ProviderConfig, type ToolCall, type ToolId } from "../domain";
 import { fetchWithRetry } from "./retry";
 import { readSse, safeJson } from "./sse";
 import { assertOk, closeJsonSchema, type CompletionRequest, type CompletionResult, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
@@ -172,7 +172,7 @@ export class AnthropicProvider implements LlmProvider {
         const block = parsed.content_block as Record<string, unknown> | undefined;
         if (block?.type === "tool_use") {
           toolBlocks.set(Number(parsed.index), {
-            id: String(block.id ?? `toolu_${crypto.randomUUID()}`),
+            id: String(block.id ?? `toolu_${randomId()}`),
             name: String(block.name ?? ""),
             json: "",
             initialInput: objectValue(block.input),

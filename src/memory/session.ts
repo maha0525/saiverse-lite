@@ -35,7 +35,21 @@ export async function prepareSession(repository: LiteRepository, persona: Person
   const anchorMoved = anchorId !== session.anchorMessageId;
   if (anchorMoved || session.headText === null || session.headSystemPrompt !== persona.systemPrompt) {
     const head = await buildHeadFields(repository, persona, threadId, anchorId);
-    session = await repository.updateSession(persona.id, (current) => ({ ...current, ...head, anchorMessageId: anchorId }));
+    // The screen can change the thread while this reads; an anchor only holds for its own thread.
+    session = await repository.updateSession(persona.id, (current) => (
+      current.activeThreadId === threadId ? { ...current, ...head, anchorMessageId: anchorId } : current
+    ));
   }
   return { session, rows };
+}
+
+/**
+ * Makes `threadId` the thread the persona's conversation continues in, with its
+ * anchor settled so the next response and Metabolism both see it. A persona
+ * still importing keeps its session as it is: the import decides the thread.
+ */
+export async function activateThread(repository: LiteRepository, persona: Persona, threadId: string): Promise<PersonaSession> {
+  const current = await repository.getSession(persona.id);
+  if (current && (current.importState === "importing" || current.activeThreadId === threadId)) return current;
+  return (await prepareSession(repository, persona, threadId)).session;
 }

@@ -1,4 +1,4 @@
-import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import { randomId, type ProviderConfig, type ToolCall, type ToolId } from "../domain";
 import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
 import {
@@ -340,7 +340,7 @@ export class OpenAiProvider implements LlmProvider {
       yield {
         type: "tool-call",
         call: {
-          id: call.id || `call_${crypto.randomUUID()}`,
+          id: call.id || `call_${randomId()}`,
           name: call.name as ToolId,
           arguments: safeJson(call.arguments) ?? {},
         },

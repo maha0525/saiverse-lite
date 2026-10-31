@@ -1,6 +1,7 @@
 import {
   createChatMessage,
   normalizeSettings,
+  randomId,
   type ChatMessage,
   type ConversationThread,
   type FragmentRecord,
@@ -252,7 +253,7 @@ function importNativeMessage(
   seq: number,
 ): ChatMessage {
   const { tool_call_id: _toolCallId, tool_name: toolName, tool_calls: _toolCalls, lite_provider_state: _providerState, ...metadata } = metadataOf(rawMessage.metadata);
-  const id = stringOrNull(metadata.lite_message_id) ?? stringOrNull(rawMessage.id) ?? `message_${crypto.randomUUID()}`;
+  const id = stringOrNull(metadata.lite_message_id) ?? stringOrNull(rawMessage.id) ?? `message_${randomId()}`;
   const content = typeof rawMessage.content === "string" ? rawMessage.content : "";
   const createdAt = fromEpoch(rawMessage.created_at);
   const edited = typeof metadata.edited_at === "string" ? Date.parse(metadata.edited_at) : null;
@@ -289,7 +290,7 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
           retiredAutomaticSummaries += 1;
           continue;
         }
-        const id = stringOrNull(metadata.lite_memory_id) ?? stringOrNull(rawMessage.id) ?? `memory_${crypto.randomUUID()}`;
+        const id = stringOrNull(metadata.lite_memory_id) ?? stringOrNull(rawMessage.id) ?? `memory_${randomId()}`;
         const createdAt = fromEpoch(rawMessage.created_at);
         const updatedAt = typeof metadata.updated_at === "string" ? Date.parse(metadata.updated_at) : createdAt;
         memories.push({

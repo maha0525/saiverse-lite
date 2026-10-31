@@ -1,4 +1,4 @@
-import type { ChatMessage, PageRecord } from "../domain";
+import { randomId, type ChatMessage, type PageRecord } from "../domain";
 import type { CompletionRequest, LlmProvider } from "../llm/types";
 import type { RetryNotice } from "../llm/retry";
 import { CATEGORY_CHRONICLE, epochSeconds, ROOT_CHRONICLE_ID } from "../pageRecords";
@@ -318,7 +318,7 @@ async function draftEntryPage(repository: LiteRepository, personaId: string, pag
   const now = epochSeconds(Date.now());
   const shortId = nextChronicleShortId(pages);
   return {
-    id: crypto.randomUUID(),
+    id: randomId(),
     personaId,
     parentId: ROOT_CHRONICLE_ID,
     title: `chronicle:${shortId}`,

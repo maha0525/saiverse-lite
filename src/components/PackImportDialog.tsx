@@ -7,6 +7,8 @@ import type { PackImportProgress, PackImportResult, PackImportStage } from "../p
 interface PackImportDialogProps {
   providers: ProviderConfig[];
   defaultProviderId: string;
+  /** Given when continuing a persona that already has a model. */
+  defaultModel?: string;
   /** Names of the personas whose import stopped partway. */
   interruptedNames: string[];
   onImport(file: File, providerId: string, model: string, onProgress: (progress: PackImportProgress) => void): Promise<PackImportResult>;
@@ -34,7 +36,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
   const firstProvider = props.providers.find((provider) => provider.id === props.defaultProviderId) ?? props.providers[0];
   const [file, setFile] = useState<File | null>(null);
   const [providerId, setProviderId] = useState(firstProvider?.id ?? "");
-  const [model, setModel] = useState(firstProvider?.defaultModel ?? "");
+  const [model, setModel] = useState(props.defaultModel || firstProvider?.defaultModel || "");
   const [progress, setProgress] = useState<PackImportProgress | null>(null);
   const [error, setError] = useState("");
   const [result, setResult] = useState<PackImportResult | null>(null);

@@ -184,7 +184,8 @@ describe("full backup", () => {
       },
     };
     const restored = parseFullBackup(oldBackup, 1_700_000_009_000);
-    expect(restored.settings).toMatchObject({ userName: "", userAvatarDataUrl: null, recentContextMessages: 24 });
+    expect(restored.settings).toMatchObject({ userName: "", userAvatarDataUrl: null });
+    expect(restored.settings).not.toHaveProperty("recentContextMessages");
     expect(restored.settings).not.toHaveProperty("autoSummaryEnabled");
     expect(restored.settings).not.toHaveProperty("summaryEveryMessages");
 

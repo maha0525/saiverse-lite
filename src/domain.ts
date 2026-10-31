@@ -167,7 +167,7 @@ export interface ProviderConfig {
   apiKey: string;
   baseUrl: string;
   defaultModel: string;
-  /** Model for the Metabolism steps other than the sluice. Blank falls back to defaultModel. */
+  /** Model for the Metabolism steps other than the sluice. Blank falls back to the persona's model. */
   lightModel?: string;
   imageModel: string;
   geminiAutoCache: boolean;
@@ -182,7 +182,6 @@ export interface AppSettings {
   theme: ThemeMode;
   userName: string;
   userAvatarDataUrl: string | null;
-  recentContextMessages: number;
   storagePersisted: boolean | null;
   /** 同意済みの法務文書バージョン (legal.ts の LEGAL_VERSION)。未同意は undefined。加算的な任意フィールド (FORMATS.md §6)。 */
   consentVersion?: string;
@@ -205,7 +204,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   userName: "",
   userAvatarDataUrl: null,
-  recentContextMessages: 24,
   storagePersisted: null,
 };
 
@@ -215,6 +213,7 @@ export function normalizeSettings(value: unknown): AppSettings {
     : {};
   delete current.autoSummaryEnabled;
   delete current.summaryEveryMessages;
+  delete current.recentContextMessages;
   return { ...DEFAULT_SETTINGS, ...(current as Partial<AppSettings>), id: "app" };
 }
 
@@ -223,9 +222,13 @@ export function isRetiredAutomaticSummary(value: unknown): boolean {
     && (value as Record<string, unknown>).kind === "summary";
 }
 
+/** `crypto.randomUUID` exists only in a Secure Context, and the app is also opened over plain http on a LAN. */
+export function randomId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 export function newId(prefix: string): string {
-  const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `${prefix}_${random}`;
+  return `${prefix}_${randomId()}`;
 }
 
 type NewChatMessage = Pick<ChatMessage, "id" | "threadId" | "personaId" | "role" | "content" | "createdAt" | "seq">

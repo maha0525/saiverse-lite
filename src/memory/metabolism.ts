@@ -110,13 +110,11 @@ async function runLocked(options: MetabolismOptions): Promise<MetabolismOutcome>
   // The last row always stays: the anchor has to point at a real row.
   const newAnchor = rows[Math.min(evicted, rows.length - 1)]!;
   const head = await buildHeadFields(repository, persona, threadId, newAnchor.id);
-  await repository.updateSession(persona.id, (current): PersonaSession => ({
-    ...current,
-    ...head,
-    anchorMessageId: newAnchor.id,
-    metabolismError: null,
-    metabolismNotice: notice,
-  }));
+  await repository.updateSession(persona.id, (current): PersonaSession => {
+    const outcome = { ...current, metabolismError: null, metabolismNotice: notice };
+    // The user can change thread during a run. The entries it compiled stay; the anchor and head were for the old thread.
+    return current.activeThreadId === threadId ? { ...outcome, ...head, anchorMessageId: newAnchor.id } : outcome;
+  });
   return "ok";
 }
 

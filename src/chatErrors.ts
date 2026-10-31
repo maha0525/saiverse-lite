@@ -16,6 +16,14 @@ export class ChatOperationError extends Error {
   }
 }
 
+/** Nothing was written, so there is nothing to roll back. */
+export class PersonaImportingError extends Error {
+  constructor() {
+    super("このペルソナは取り込みの途中です。取り込みが終わると話せます");
+    this.name = "PersonaImportingError";
+  }
+}
+
 export interface ChatErrorPresentation {
   title: string;
   message: string;
@@ -128,6 +136,14 @@ export function presentChatError(error: unknown, fallbackOperation: ChatOperatio
         detail,
       };
     }
+  }
+
+  if (original instanceof PersonaImportingError) {
+    return {
+      title: "取り込みが終わっていません",
+      message: "本体で書き出した同じ ZIP を選ぶと、続きから入ります。終わると話せるようになります。",
+      detail,
+    };
   }
 
   const originalMessage = original instanceof Error ? original.message : String(original);

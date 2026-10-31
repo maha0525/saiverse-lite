@@ -152,6 +152,8 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
   2. 全部入っていれば、新しい側から残す量の字数に届く行。
 - 会話の行が残す量を下回っていたら、開始位置より古い行を不足分だけ足す（`sea/session_lifecycle.py` の `ensure_window_floor`）。
 - 上限を超えていたら、最初の応答の前に Metabolism を走らせる。
+- 画面で開いたスレッドが `activeThreadId` になる（`src/memory/session.ts` の `activateThread`）。別のスレッドへ移ると `anchorMessageId` を消して上の規則で決め直し、head と Chronicle も作り直す。`importing` のペルソナでは何もしない。
+- Metabolism の実行中にスレッドが変わったときは、書いたあらすじは残し、開始位置と head は書かない。開始位置はスレッドごとの値なので、別のスレッドへ持ち越さない。
 
 送る本文の字数と会話の行の字数は別の値として数える。上限と比べるのは送る本文の合計、残す量と比べるのは会話の行だけ（`docs/concepts/metabolism.md`）。
 
@@ -186,7 +188,7 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 ## プロバイダ
 
 - `ProviderRequest` の `memoryContext` は Chronicle の本文になる。
-- `ProviderConfig` に任意の `lightModel` を足す。空なら `defaultModel`。`providerDefaults.ts` に各社の既定を足す。モデル名は `apiKeyGuideData.ts` と `providerDefaults.ts` にある実在の名前から選ぶ。推測で書かない。
+- `ProviderConfig` に任意の `lightModel` を足す。空ならペルソナの会話のモデル。`providerDefaults.ts` に各社の既定を足す。モデル名は `apiKeyGuideData.ts` と `providerDefaults.ts` にある実在の名前から選ぶ。推測で書かない。
 - `LlmProvider` に `complete(request)` を足す。ストリーミングしない一括の応答で、`responseSchema` を渡せる。Gemini、OpenAI、OpenAI 互換、Anthropic はそれぞれの正式な方法で実装する。`mock` は決まった応答を返す。`litert-local` は構造化出力なしと宣言する。
 
 ## 共通文
@@ -237,7 +239,10 @@ You are a highly capable, thoughtful, and precise assistant. Your **pseudo** goa
 - 記憶の画面は、コア記憶、Memopedia、Chronicle を閲覧でき、コア記憶と Memopedia のページを編集できる。
 - 取り込みの画面は進捗と失敗を出す。
 - Metabolism の実行中と失敗を会話の画面に出す。ログだけにしない。
-- 大量のメッセージがあっても会話の画面が固まらないよう、直近の範囲だけを描画し、古い側は操作で読み足す。
+- 大量のメッセージがあっても会話の画面が固まらないよう、直近の範囲だけを描画し、古い側は操作で読み足す（`src/conversationPage.ts`、一度に 100 件）。
+- system / host の行と、提示対象でない user / assistant の行は、折りたたんだ通知として出す。空の行は出さない。
+- `importing` のペルソナは会話と記憶の画面の代わりに、同じ ZIP で続きから入れる案内を出す。
+- `metabolismError` は閉じられない（次の成功で消える。`chatService` が事前の実行を飛ばす判定に使う）。`metabolismNotice` は閉じると消す。
 - 添付画像は ZIP から読んで会話の画面に出す。LLM へは本体の `[画像: uri]` の文字の形で送る。
 
 ## 検証

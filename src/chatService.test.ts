@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService } from "./chatService";
-import { ChatOperationError } from "./chatErrors";
+import { ChatOperationError, PersonaImportingError, presentChatError } from "./chatErrors";
 import { createChatMessage, createDefaultPersona, newId, type ChatMessage, type ConversationThread } from "./domain";
 import { retryDefaults } from "./llm/retry";
 import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
@@ -259,5 +259,40 @@ describe("ChatService with mock provider", () => {
     await repository.updateSession(persona.id, (session) => ({ ...session, importState: "importing" }));
     await expect(new ChatService(repository).send(persona, thread, "こんにちは")).rejects.toThrow("取り込みの途中");
     expect(await repository.listMessages(thread.id)).toEqual([]);
+  });
+
+  it("refuses to regenerate for such a persona, and tells the user what to do", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "取り込み中", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    const answer = createChatMessage({ id: newId("message"), threadId: thread.id, personaId: persona.id, role: "assistant", content: "途中の返答", createdAt: now, seq: 1 });
+    await repository.putMessage(answer);
+    await repository.updateSession(persona.id, (session) => ({ ...session, importState: "importing" }));
+    const failure = await new ChatService(repository).regenerate(persona, thread.id).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(PersonaImportingError);
+    expect(presentChatError(failure, "regenerate").message).toContain("同じ ZIP");
+    expect(await repository.listMessages(thread.id)).toEqual([answer]);
+  });
+
+  it("replaces the last response the user can see, not a blank tool row after it", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "続きの会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    const rows = [
+      createChatMessage({ id: "row-1", threadId: thread.id, personaId: persona.id, role: "user", content: "質問", createdAt: now, seq: 1 }),
+      createChatMessage({ id: "row-2", threadId: thread.id, personaId: persona.id, role: "assistant", content: "見えている返答", createdAt: now + 1, seq: 2 }),
+      createChatMessage({ id: "row-3", threadId: thread.id, personaId: persona.id, role: "assistant", content: "", createdAt: now + 2, seq: 3 }),
+    ];
+    await repository.writePersonaRecords(persona.id, { messages: rows });
+    await new ChatService(repository).regenerate(persona, thread.id);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored.some((message) => message.content === "見えている返答")).toBe(false);
+    expect(stored.filter((message) => message.role === "assistant" && message.content.includes("モック応答"))).toHaveLength(1);
   });
 });

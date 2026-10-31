@@ -139,15 +139,15 @@ are saved again.
 
 Prompt assembly order is fixed:
 
-1. persona system prompt (**fixed head**)
+1. head (`PersonaSession.headText`, rebuilt by Metabolism and when the system prompt is edited)
 2. persona tool definitions (**fixed for the persona**)
-3. injected memory block (user-authored and imported notes, deterministic newest-first budget)
-4. recent conversation window (`recentContextMessages`, default 24)
+3. Chronicle (`PersonaSession.chronicleText`)
+4. the window of the active thread, from `PersonaSession.anchorMessageId` on
 5. current user input / tool result
 
-The fixed system head and fixed tool set never depend on an individual turn. This keeps
-provider prefix-cache structure stable. The memory block is intentionally after that
-fixed head.
+The head and the fixed tool set never depend on an individual turn. This keeps provider
+prefix-cache structure stable. `docs/memory_core.md` holds the rules of each part. The
+legacy setting `recentContextMessages` is ignored and removed like the two above.
 
 ## 5. Official ChatGPT and Claude imports
 

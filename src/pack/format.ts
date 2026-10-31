@@ -1,6 +1,7 @@
 // Value encoding of a persona pack. Canon: saiverse_memory/persona_pack/format.py in the body.
 
 export const FORMAT_NAME = "persona-pack";
+export const FORMAT_VERSION = "1.0";
 export const MANIFEST_NAME = "manifest.json";
 
 export const BYTES_MARKER = "__bytes_b64__";
@@ -49,7 +50,26 @@ export function parseJson(text: string): unknown {
   }
 }
 
-function base64ToBytes(value: string): Uint8Array {
+/** body: json.dumps writes NaN and the infinities as bare words, and JSON.stringify would write null. */
+export function stringifyJson(value: unknown, indent?: number): string {
+  let marked = false;
+  const text = JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item !== "number" || Number.isFinite(item)) return item;
+    marked = true;
+    return `${NON_FINITE_MARK}${item}`;
+  }, indent);
+  return marked ? text.replace(new RegExp(`"${NON_FINITE_MARK}(NaN|-?Infinity)"`, "g"), "$1") : text;
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  const pieces: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    pieces.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)));
+  }
+  return btoa(pieces.join(""));
+}
+
+export function base64ToBytes(value: string): Uint8Array {
   const binary = atob(value.replace(/[^A-Za-z0-9+/=]/g, ""));
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
@@ -70,6 +90,17 @@ export function decodeValue(value: unknown): unknown {
     if (typeof raw === "string") return raw;
   }
   return Object.fromEntries(keys.map((key) => [key, decodeValue(value[key])]));
+}
+
+/** body: format.py encode_value, the inverse of `decodeValue`. */
+export function encodeValue(value: unknown): unknown {
+  if (value instanceof Uint8Array) return { [BYTES_MARKER]: bytesToBase64(value) };
+  if (Array.isArray(value)) return value.map(encodeValue);
+  if (!isObject(value)) return value;
+  const encoded = Object.fromEntries(Object.entries(value).map(([key, item]) => [key, encodeValue(item)]));
+  const keys = Object.keys(encoded);
+  const markerShaped = keys.length === 1 && [BYTES_MARKER, RAW_TEXT_MARKER, ESCAPED_MARKER].includes(keys[0]!);
+  return markerShaped ? { [ESCAPED_MARKER]: encoded } : encoded;
 }
 
 /** The value of a text column as a persona reads it. NULL is empty. */
@@ -184,6 +215,14 @@ function isoToMilliseconds(value: string): number | null {
 export function packTimeToMilliseconds(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value * 1000;
   return typeof value === "string" ? isoToMilliseconds(value) : null;
+}
+
+/** body: format.py epoch_to_iso. */
+export function epochToIso(seconds: number): string {
+  const whole = Math.floor(seconds);
+  const microseconds = Math.round((seconds - whole) * 1_000_000);
+  const fraction = microseconds ? `.${String(microseconds).padStart(6, "0")}` : "";
+  return `${new Date(whole * 1000).toISOString().slice(0, 19)}${fraction}+00:00`;
 }
 
 /** body: format.py iso_to_epoch. Epoch seconds, whole unless the source has a fraction. */

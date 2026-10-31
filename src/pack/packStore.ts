@@ -1,3 +1,12 @@
+/** A ZIP being written out, on disk so a large pack does not sit in memory. */
+export interface PackWorkFile {
+  readonly writable: WritableStream<Uint8Array>;
+  /** The finished ZIP, once `writable` has closed. It stays until the next `openWork` or `clearWork`. */
+  file(): Promise<Blob>;
+  /** Drops what was written. */
+  abort(): Promise<void>;
+}
+
 /** Keeps the original ZIP of each imported persona: `packs/<persona_id>.zip`. */
 export interface PackStore {
   /** Why a pack cannot be kept here, or null when it can. */
@@ -7,11 +16,16 @@ export interface PackStore {
   /** A stopped write leaves what was stored before. */
   put(personaId: string, file: Blob): Promise<void>;
   get(personaId: string): Promise<Blob | null>;
+  /** Removes the stored ZIP and any work file of the persona. */
   delete(personaId: string): Promise<void>;
+  openWork(personaId: string): Promise<PackWorkFile>;
+  /** Removes every work file, so one left by a closed tab does not hold storage. */
+  clearWork(): Promise<void>;
 }
 
 const PACKS_DIRECTORY = "packs";
-const UNAVAILABLE = "このブラウザは大きなファイルの保存に対応していないため、取り込めません。最新のブラウザで開いてください。";
+const WORK_DIRECTORY = "pack-work";
+const UNAVAILABLE = "このブラウザは大きなファイルの保存に対応していません。最新のブラウザで開いてください。";
 
 function packFileName(personaId: string): string {
   return `${encodeURIComponent(personaId)}.zip`;
@@ -63,17 +77,54 @@ export class OpfsPackStore implements PackStore {
     }
   }
 
-  async delete(personaId: string): Promise<void> {
+  private async workDirectory(): Promise<FileSystemDirectoryHandle> {
+    const root = await navigator.storage.getDirectory();
+    return root.getDirectoryHandle(WORK_DIRECTORY, { create: true });
+  }
+
+  private async removeFrom(directory: FileSystemDirectoryHandle, name: string): Promise<void> {
     try {
-      await (await this.directory()).removeEntry(packFileName(personaId));
+      await directory.removeEntry(name);
     } catch (error) {
       if (!isNotFound(error)) throw error;
     }
+  }
+
+  async delete(personaId: string): Promise<void> {
+    await this.removeFrom(await this.directory(), packFileName(personaId));
+    await this.removeFrom(await this.workDirectory(), packFileName(personaId));
+  }
+
+  async openWork(personaId: string): Promise<PackWorkFile> {
+    const directory = await this.workDirectory();
+    const name = packFileName(personaId);
+    const handle = await directory.getFileHandle(name, { create: true });
+    // ZipWriter locks `writable`, and `abort` has to reach the file past that lock.
+    const output = (await handle.createWritable()).getWriter();
+    return {
+      writable: new WritableStream<Uint8Array>({
+        write: (chunk) => output.write(chunk),
+        close: () => output.close(),
+        abort: (reason) => output.abort(reason),
+      }),
+      file: () => handle.getFile(),
+      abort: async () => {
+        await output.abort().catch(() => undefined);
+        await this.removeFrom(directory, name);
+      },
+    };
+  }
+
+  async clearWork(): Promise<void> {
+    const directory = await this.workDirectory();
+    for await (const name of directory.keys()) await this.removeFrom(directory, name);
   }
 }
 
 export class MemoryPackStore implements PackStore {
   private readonly files = new Map<string, Blob>();
+  /** The ZIPs a finished work file holds. */
+  readonly work = new Map<string, Blob>();
 
   constructor(private readonly reason: string | null = null, private readonly free: number | null = null) {}
 
@@ -81,5 +132,24 @@ export class MemoryPackStore implements PackStore {
   async freeBytes(): Promise<number | null> { return this.free; }
   async put(personaId: string, file: Blob): Promise<void> { this.files.set(personaId, file); }
   async get(personaId: string): Promise<Blob | null> { return this.files.get(personaId) ?? null; }
-  async delete(personaId: string): Promise<void> { this.files.delete(personaId); }
+  async delete(personaId: string): Promise<void> {
+    this.files.delete(personaId);
+    this.work.delete(personaId);
+  }
+
+  async openWork(personaId: string): Promise<PackWorkFile> {
+    const chunks: Uint8Array<ArrayBuffer>[] = [];
+    return {
+      // ZipWriter reuses its buffers.
+      writable: new WritableStream<Uint8Array>({ write: (chunk) => { chunks.push(chunk.slice()); } }),
+      file: async () => {
+        const blob = new Blob(chunks);
+        this.work.set(personaId, blob);
+        return blob;
+      },
+      abort: async () => { this.work.delete(personaId); },
+    };
+  }
+
+  async clearWork(): Promise<void> { this.work.clear(); }
 }

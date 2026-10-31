@@ -34,6 +34,7 @@ import { withoutPassphrase } from "./memory/conversation";
 import { activateThread } from "./memory/session";
 import { resolveInitialAnchor } from "./memory/window";
 import { readAttachment, type AttachmentItem } from "./pack/attachments";
+import { exportPersonaPack, type PackExportProgress } from "./pack/exportPack";
 import { importPersonaPack, type PackImportProgress } from "./pack/importPack";
 import { OpfsPackStore } from "./pack/packStore";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
@@ -206,6 +207,7 @@ export default function App() {
     void (async () => {
       try {
         await repository.initialize();
+        void packStore.clearWork().catch((error: unknown) => console.warn("[SAIVerse Lite][pack] work files could not be cleared", error));
         const persisted = await requestPersistentStorage();
         const current = await repository.getSettings();
         if (current.storagePersisted !== persisted) await repository.putSettings({ ...current, storagePersisted: persisted });
@@ -497,6 +499,15 @@ export default function App() {
       setDataBusy(false);
     }
   };
+  const exportPack = async (personaId: string, onProgress: (progress: PackExportProgress) => void) => {
+    setDataBusy(true);
+    setNotice("");
+    try {
+      return await exportPersonaPack(personaId, repository, packStore, onProgress);
+    } finally {
+      setDataBusy(false);
+    }
+  };
   const listInterruptedImports = async () => {
     const sessions = await Promise.all(personas.map((persona) => repository.getSession(persona.id)));
     return personas.filter((_, index) => sessions[index]?.importState === "importing").map((persona) => persona.name);
@@ -520,6 +531,7 @@ export default function App() {
     if (view === "data") return <DataView
       persona={selectedPersona} personas={personas} providers={providers} busy={dataBusy} notice={notice}
       onImportPack={importPack}
+      onExportPack={(onProgress) => exportPack(selectedPersona.id, onProgress)}
       listInterruptedImports={listInterruptedImports}
       onExportPersona={() => downloadJson(`${selectedPersona.id}_persona.json`, exportPersona(selectedPersona))}
       onExportMemory={exportCurrentMemory}

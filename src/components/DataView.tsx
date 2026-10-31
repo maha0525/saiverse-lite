@@ -2,8 +2,10 @@ import { useState } from "react";
 import { Download, Globe, Import, PackageOpen, Smartphone } from "lucide-react";
 import type { Persona, ProviderConfig } from "../domain";
 import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, type ClaudeMemoryText, type ImportedConversation, type ImportSource } from "../importers";
+import type { PackExportProgress, PackExportResult } from "../pack/exportPack";
 import type { PackImportProgress, PackImportResult } from "../pack/importPack";
 import { OfficialImportDialog, type ConversationImportTarget } from "./OfficialImportDialog";
+import { PackExportCard } from "./PackExportCard";
 import { PackImportDialog } from "./PackImportDialog";
 
 interface DataViewProps {
@@ -19,6 +21,7 @@ interface DataViewProps {
   onImportNative(file: File): Promise<void>;
   onImportOfficial(target: ConversationImportTarget, conversations: ImportedConversation[], memories: ClaudeMemoryText[]): Promise<boolean>;
   onImportPack(file: File, providerId: string, model: string, onProgress: (progress: PackImportProgress) => void): Promise<PackImportResult>;
+  onExportPack(onProgress: (progress: PackExportProgress) => void): Promise<PackExportResult>;
   /** Names of the personas whose pack import stopped partway. */
   listInterruptedImports(): Promise<string[]>;
 }
@@ -65,6 +68,7 @@ export function DataView(props: DataViewProps) {
       {(props.notice || prepareError) && <div className="notice" role="status">{prepareError || props.notice}</div>}
       <div className="data-grid">
         <article className="panel data-card"><span className="card-icon" aria-hidden="true"><PackageOpen size={20} strokeWidth={1.8} /></span><h2>本体のパートナーを連れてくる</h2><p>本体で書き出したペルソナまるごとパック（ZIP）から、会話と記憶ごと連れてきます。</p><div className="button-stack"><button className="button" onClick={() => void openPackImport()} disabled={busy}>パックを選ぶ</button></div></article>
+        <PackExportCard key={props.persona.id} persona={props.persona} busy={busy} onExport={props.onExportPack} />
         <article className="panel data-card"><span className="card-icon" aria-hidden="true"><Globe size={20} strokeWidth={1.8} /></span><h2>SAIVerse 本体へ</h2><p>{props.persona.name}の定義と、会話・記憶を本体互換形式で分けて書き出します。</p><div className="button-stack"><button className="button" onClick={props.onExportPersona} disabled={busy}>ペルソナ定義を保存</button><button className="button secondary" onClick={() => void props.onExportMemory()} disabled={busy}>会話+記憶を保存</button></div></article>
         <article className="panel data-card"><span className="card-icon" aria-hidden="true"><Smartphone size={20} strokeWidth={1.8} /></span><h2>端末を移る</h2><p>全ペルソナ・全履歴・設定を一つにまとめます。APIキーは含みません。ペルソナまるごとパックの添付と手帳も含まないので、残したいときは元の ZIP を自分で保管してください。</p><div className="button-stack"><button className="button" onClick={() => void props.onExportBackup()} disabled={busy}>フルバックアップ</button><FileAction label="バックアップを復元" accept="application/json,.json" disabled={busy} onFile={props.onImportBackup} /></div></article>
         <article className="panel data-card"><span className="card-icon" aria-hidden="true"><Download size={20} strokeWidth={1.8} /></span><h2>本体形式から戻す</h2><p>`saiverse_saimemory_v1` の会話と記憶を、選択中のパートナーへ取り込みます。</p><FileAction label="本体形式を読み込む" accept="application/json,.json" disabled={busy} onFile={props.onImportNative} /></article>

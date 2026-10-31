@@ -8,8 +8,8 @@
 
 ## 段階
 
-この文書の範囲は、本体のパックを取り込み、Lite で会話と Metabolism が続けられるところまで。
-パックの書き出しと本体への合流はこの範囲に入れない。ただし、書き出せなくなる形にしない。
+この文書の範囲は、本体のパックを取り込み、Lite で会話と Metabolism を続け、パックとして書き出すところまで。
+本体での合流の規則は本体の `docs/intent/persona_pack.md` の「Lite から帰るときの合流」にある。
 
 ## データ
 
@@ -126,6 +126,22 @@ interface PersonaSession {
 - 取り込み後、`activeThreadId` と `anchorMessageId` を決める。下の「送る会話」の規則を使う。
 - モデル設定は引き継がない。取り込み時に Lite のプロバイダを選ぶ。
 - API キーは扱わない。パックにも無い。
+
+## パックの書き出し
+
+`src/pack/exportPack.ts` の `exportPersonaPack`。読み取りだけで、Lite の記録は変えない。形式の正典は本体の `saiverse_memory/persona_pack/export.py` と `format.py`。
+
+- ZIP は `PackStore.openWork` の作業ファイルへ流す。OPFS の `pack-work/<persona_id>.zip`。次の書き出しと、次の起動の `clearWork` で消える。保存の操作は画面のボタンから行う（`navigator.share` が利用者の操作の直後でないと動かないため。`src/pack/savePack.ts`）。
+- 発言は 300 件ずつ読み、JSON の配列は一要素ずつ書く。メモリに持つのは発言の id だけ。ページ、Fragment、スレッドは全部読む（本体の §3-6 が許す中規模の表）。
+- 元の ZIP のうち作り直さないエントリは、圧縮されたバイトのまま写す（`PackArchive.copyEntry`）。`chatlog/stelis_threads.json` も写す。Lite は Stelis を作らず、消す画面にも出さない。
+- 行の書き方は `src/pack/rows.ts` の読む関数の逆。`source` のある行は `source` を土台に、読む関数が `source` から作る値と違う列だけを置き換える。編集していない行は `source` と一致する。`source` の無い行は本体の行の形で全部書く。
+- Lite で生まれた `user` / `assistant` の行にはタグが無いので、書き出すときに `conversation` を付ける。本体の想起がこのタグで絞るため。
+- 取り込みが断った行は Lite に無いが消されたわけではないので、元の形のままパックに残し、`changes.json` の deleted に入れない。
+- `changes.json` は intent の形。編集して消したページは deleted だけに入れる（本体の検査が同じ id の重複と、消した行の edited を断る）。`source` の無い行は trunk も created に入る。Chronicle の行は created だけ。
+- 生成画像は `metadata.imageDataUrl` の data URL で保存している。`attachments/image/lite_<id>.<ext>` と `attachments/index.json` の項目にし、行の metadata は `images` の項目に置き換える。data URL でない値（画像のアドレス）はファイルにできないので metadata のまま残し、件数を画面に出す。
+- 書き出すすべての JSON から現行の合言葉を伏せる（`PackOutput`）。
+- 元の ZIP が無く `source` のある行を持つペルソナ（フルバックアップから復元した子）は、Lite にある行だけで書き出す。消した行は分からないので、そのことを画面に出す。
+- 元のパックの `chatgpt_compat/` は作り直さない。本体の取り込みが読まないフォルダなので、編集と削除はここに反映されない。
 
 ## 会話の組み立て
 

@@ -1,4 +1,4 @@
-import { BlobReader, BlobWriter, ZipReader, configure, type FileEntry } from "@zip.js/zip.js";
+import { BlobReader, BlobWriter, ZipReader, configure, type FileEntry, type ZipWriter } from "@zip.js/zip.js";
 import { MAX_JSON_ELEMENT_CHARS, PackError, PackFormatError, isObject, parseJson } from "./format";
 import { iterJsonArray } from "./jsonStream";
 
@@ -145,6 +145,13 @@ export class PackArchive {
       yield row;
       index += 1;
     }
+  }
+
+  /** Writes the entry into another ZIP as its compressed bytes, so nothing inflates or deflates again. */
+  async copyEntry<Target>(name: string, target: ZipWriter<Target>): Promise<void> {
+    const entry = this.entry(name);
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    await Promise.all([entry.getData(writable, { passThrough: true }), target.add(name, readable, { entry, passThrough: true })]);
   }
 
   async close(): Promise<void> {

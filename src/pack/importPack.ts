@@ -3,7 +3,7 @@ import { withOriginLock } from "../originLock";
 import { createPersonaSession, createTrunkPages, epochSeconds } from "../pageRecords";
 import { RowOwnerError, type LiteRepository, type PersonaRecordBatch } from "../storage/repository";
 import { PackArchive } from "./archive";
-import { PackError, decodeText, isObject, refusedJsonTextColumns } from "./format";
+import { PackError, bytesToBase64, decodeText, isObject, refusedJsonTextColumns } from "./format";
 import type { PackStore } from "./packStore";
 import { fragmentFromRow, messageFromRow, pageFromRow, threadFromRows, type ThreadSpan } from "./rows";
 import {
@@ -77,11 +77,7 @@ interface ProfileFields {
 }
 
 function bytesToDataUrl(bytes: Uint8Array, type: string): string {
-  const pieces: string[] = [];
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    pieces.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)));
-  }
-  return `data:${type};base64,${btoa(pieces.join(""))}`;
+  return `data:${type};base64,${bytesToBase64(bytes)}`;
 }
 
 async function readIcon(archive: PackArchive, files: unknown, warnings: string[]): Promise<string | null> {
@@ -99,19 +95,33 @@ async function readIcon(archive: PackArchive, files: unknown, warnings: string[]
   return bytesToDataUrl(await archive.bytes(name), type);
 }
 
-async function readProfile(archive: PackArchive, manifest: PackManifest, warnings: string[]): Promise<ProfileFields> {
-  const profile = manifest.contents.has("profile") && archive.has(PROFILE_FILE) ? await archive.jsonDocument(PROFILE_FILE) : null;
+export function readProfileDocument(archive: PackArchive, manifest: PackManifest): Promise<unknown> {
+  return manifest.contents.has("profile") && archive.has(PROFILE_FILE) ? archive.jsonDocument(PROFILE_FILE) : Promise.resolve(null);
+}
+
+/** The three profile values Lite keeps. Writing a pack back compares against this same reading. */
+export function profileText(profile: unknown, manifest: PackManifest): { AINAME: string; SYSTEMPROMPT: string; DESCRIPTION: string } {
   const ai = isObject(profile) && isObject(profile.ai) ? profile.ai : {};
   return {
-    name: decodeText(ai.AINAME) || manifest.personaName || manifest.personaId,
-    description: decodeText(ai.DESCRIPTION),
-    systemPrompt: decodeText(ai.SYSTEMPROMPT),
+    AINAME: decodeText(ai.AINAME) || manifest.personaName || manifest.personaId,
+    SYSTEMPROMPT: decodeText(ai.SYSTEMPROMPT),
+    DESCRIPTION: decodeText(ai.DESCRIPTION),
+  };
+}
+
+async function readProfile(archive: PackArchive, manifest: PackManifest, warnings: string[]): Promise<ProfileFields> {
+  const profile = await readProfileDocument(archive, manifest);
+  const { AINAME, SYSTEMPROMPT, DESCRIPTION } = profileText(profile, manifest);
+  return {
+    name: AINAME,
+    description: DESCRIPTION,
+    systemPrompt: SYSTEMPROMPT,
     avatarDataUrl: await readIcon(archive, isObject(profile) ? profile.files : null, warnings),
   };
 }
 
 /** body: adapter.py _active_persona_suffix. Only the value is read; a broken file counts as none. */
-async function readActiveThreadSuffix(archive: PackArchive, manifest: PackManifest): Promise<string | null> {
+export async function readActiveThreadSuffix(archive: PackArchive, manifest: PackManifest): Promise<string | null> {
   if (!manifest.contents.has("extensions/saiverse") || !archive.has(ACTIVE_STATE_FILE)) return null;
   let state: unknown;
   try {
@@ -135,15 +145,17 @@ function chooseActiveThread(personaId: string, suffix: string | null, threads: C
   return candidates.reduce<ConversationThread | null>((latest, thread) => (latest && latest.updatedAt >= thread.updatedAt ? latest : thread), null)?.id ?? null;
 }
 
+export function storageShortage(needed: number, free: number): PackError {
+  const megabytes = (bytes: number) => Math.ceil(bytes / (1024 * 1024));
+  return new PackError(`端末の空き容量が足りません。約 ${megabytes(needed)}MB 必要ですが、使えるのは約 ${megabytes(free)}MB です。`);
+}
+
 async function checkStorage(packStore: PackStore, file: Blob, archive: PackArchive): Promise<void> {
   const free = await packStore.freeBytes();
   if (free === null) return;
   const jsonBytes = archive.size(MESSAGES_FILE) + archive.size(PAGES_FILE) + archive.size(FRAGMENTS_FILE);
   const needed = file.size + jsonBytes * STORED_BYTES_PER_JSON_BYTE;
-  if (needed > free) {
-    const megabytes = (bytes: number) => Math.ceil(bytes / (1024 * 1024));
-    throw new PackError(`端末の空き容量が足りません。約 ${megabytes(needed)}MB 必要ですが、使えるのは約 ${megabytes(free)}MB です。`);
-  }
+  if (needed > free) throw storageShortage(needed, free);
 }
 
 async function ownerRefusal(repository: LiteRepository, owner: string): Promise<PackError> {

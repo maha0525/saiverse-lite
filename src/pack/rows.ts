@@ -1,5 +1,5 @@
 import type { ChatMessage, ConversationThread, FragmentRecord, MessageRole, PageRecord } from "../domain";
-import { decodeJsonColumn, decodeText, isObject, packTimeToMilliseconds, packTimeToSeconds } from "./format";
+import { decodeJsonColumn, decodeText, encodeValue, epochToIso, isObject, packTimeToMilliseconds, packTimeToSeconds } from "./format";
 
 type PackRow = Record<string, unknown>;
 
@@ -93,6 +93,144 @@ function threadTitle(id: string, title: string | null): string {
 export interface ThreadSpan {
   firstMs: number;
   lastMs: number;
+}
+
+// The writing direction. A row with `source` keeps it as it came, so wrappers and columns Lite
+// does not read survive; a column is replaced only when the record differs from what the
+// reader above makes of `source`. A row without `source` is written whole, in the body's shape.
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (a instanceof Uint8Array && b instanceof Uint8Array) return a.length === b.length && a.every((byte, index) => byte === b[index]);
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((item, index) => sameValue(item, b[index]));
+  if (!isObject(a) || !isObject(b)) return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => key in b && sameValue(a[key], b[key]));
+}
+
+type Column<Stored> = readonly [field: keyof Stored, column: string, encode?: (value: unknown) => unknown];
+
+const flag = (value: unknown): number => (value ? 1 : 0);
+const isoTime = (value: unknown): string | null => (typeof value === "number" ? epochToIso(value) : null);
+
+function changedColumns<Stored>(record: Stored, read: Stored, source: PackRow, columns: readonly Column<Stored>[]): PackRow {
+  const row = { ...source };
+  for (const [field, column, encode] of columns) {
+    if (!sameValue(record[field], read[field])) row[column] = encode ? encode(record[field]) : record[field];
+  }
+  return row;
+}
+
+function allColumns<Stored>(record: Stored, columns: readonly Column<Stored>[]): PackRow {
+  return Object.fromEntries(columns.map(([field, column, encode]) => [column, encode ? encode(record[field]) : record[field]]));
+}
+
+/** What Lite can change on a message that came from a pack. */
+const MESSAGE_COLUMNS: readonly Column<ChatMessage>[] = [
+  ["role", "role"],
+  ["content", "content"],
+  ["metadata", "metadata", encodeValue],
+  ["lineRole", "line_role"],
+  ["scope", "scope"],
+  ["pairedActionText", "paired_action_text"],
+  ["pulseId", "pulse_id"],
+];
+
+/** The body's recall asks for the conversation tag. Lite saves a spoken row without any tag. */
+function metadataWithConversationTag({ role, metadata }: ChatMessage): Record<string, unknown> {
+  const spoken = role === "user" || role === "assistant";
+  return spoken && !(Array.isArray(metadata.tags) && metadata.tags.length) ? { ...metadata, tags: ["conversation"] } : metadata;
+}
+
+/** `threadId` is the row's thread as `threadRowId` writes it. */
+export function messageToRow(message: ChatMessage, threadId: string): PackRow {
+  if (message.source) return changedColumns(message, messageFromRow(message.source, message.personaId, 0), message.source, MESSAGE_COLUMNS);
+  return {
+    id: message.id,
+    thread_id: threadId,
+    role: message.role,
+    content: message.content,
+    resource_id: message.personaId,
+    // messages.created_at is whole seconds in the body; `seq` keeps the order inside one second.
+    created_at: epochToIso(Math.floor(message.createdAt / 1000)),
+    metadata: encodeValue(metadataWithConversationTag(message)),
+    origin_track_id: null,
+    line_role: message.lineRole,
+    line_id: null,
+    // messages.scope is NOT NULL.
+    scope: message.scope ?? "committed",
+    paired_action_text: message.pairedActionText,
+    pulse_id: message.pulseId,
+    thought_signature: null,
+    spell_origin_id: null,
+    spell_seq: null,
+    origin_episode: null,
+    seq: message.seq,
+  };
+}
+
+const PAGE_COLUMNS: readonly Column<PageRecord>[] = [
+  ["id", "id"],
+  ["parentId", "parent_id"],
+  ["title", "title"],
+  ["summary", "summary"],
+  ["content", "content"],
+  ["category", "category"],
+  ["createdAt", "created_at", isoTime],
+  ["updatedAt", "updated_at", isoTime],
+  ["keywords", "keywords", encodeValue],
+  ["metadata", "metadata", encodeValue],
+  ["isDeleted", "is_deleted", flag],
+  ["vividness", "vividness"],
+  ["isTrunk", "is_trunk", flag],
+  ["isImportant", "is_important", flag],
+  ["lastReferencedAt", "last_referenced_at", isoTime],
+  ["shortId", "short_id"],
+];
+
+export function pageToRow(page: PageRecord): PackRow {
+  return page.source ? changedColumns(page, pageFromRow(page.source, page.personaId), page.source, PAGE_COLUMNS) : allColumns(page, PAGE_COLUMNS);
+}
+
+/** extensions/saiverse/ holds the database values as they are, so created_at stays epoch seconds. */
+const FRAGMENT_COLUMNS: readonly Column<FragmentRecord>[] = [
+  ["id", "id"],
+  ["content", "content"],
+  ["entityId", "entity_id"],
+  ["chronicleEntryId", "chronicle_entry_id"],
+  ["vividness", "vividness"],
+  ["sourceDate", "source_date"],
+  ["createdAt", "created_at"],
+];
+
+export function fragmentToRow(fragment: FragmentRecord): PackRow {
+  return fragment.source ? changedColumns(fragment, fragmentFromRow(fragment.source, fragment.personaId), fragment.source, FRAGMENT_COLUMNS) : allColumns(fragment, FRAGMENT_COLUMNS);
+}
+
+/** body: threads are `<persona_id>:<suffix>`. A thread Lite made has a bare id until it is written. */
+export function threadRowId(threadId: string, personaId: string): string {
+  return threadId.includes(":") ? threadId : `${personaId}:${threadId}`;
+}
+
+/** body: active_state.json holds the part after the persona id (adapter.py set_active_thread). */
+export function threadSuffix(threadId: string): string {
+  return threadId.includes(":") ? threadId.slice(threadId.indexOf(":") + 1) : threadId;
+}
+
+/** The chatlog/threads.json row of a thread. Null for a Stelis thread that has none. */
+export function threadToRow(thread: ConversationThread): PackRow | null {
+  const { source } = thread;
+  if (!source) return { id: threadRowId(thread.id, thread.personaId), resource_id: thread.personaId, overview: null, overview_updated_at: null, title: thread.title };
+  if (source.id === undefined) return null;
+  // A Stelis thread's title can come from its other row, and Lite never renames one.
+  if (thread.stelis || thread.title === threadTitle(thread.id, text(source.title))) return source;
+  return { ...source, title: thread.title };
+}
+
+/** The chatlog/stelis_threads.json row of a thread, for a pack made without the original ZIP. */
+export function stelisThreadToRow(thread: ConversationThread): PackRow {
+  if (thread.source?.thread_id !== undefined) return thread.source;
+  return { thread_id: thread.id, parent_thread_id: null, depth: 0, window_ratio: 0.8, status: "completed", chronicle_prompt: null, chronicle_summary: null, created_at: epochToIso(Math.floor(thread.createdAt / 1000)), completed_at: null, label: thread.title };
 }
 
 export function threadFromRows(

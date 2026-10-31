@@ -15,7 +15,7 @@ interface PackImportDialogProps {
   onClose(): void;
 }
 
-const STAGE_LABELS: Record<PackImportStage, string> = {
+export const STAGE_LABELS: Record<PackImportStage, string> = {
   checking: "ZIP を確かめています",
   saving: "ZIP を端末に保存しています",
   messages: "会話を読み込んでいます",
@@ -26,7 +26,7 @@ const STAGE_LABELS: Record<PackImportStage, string> = {
 };
 
 /** What the person can do next. The technical reason is in the console. */
-function failureText(failure: unknown): string {
+export function packFailureText(failure: unknown): string {
   if (failure instanceof PackFormatError) return "このファイルは壊れているか、ペルソナまるごとパックではありません。本体でもう一度書き出して、選び直してください。";
   if (failure instanceof PackError) return failure.message;
   return "取り込みが止まりました。同じ ZIP をもう一度選ぶと、続きから入ります。";
@@ -50,7 +50,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
       setResult(await props.onImport(file, providerId, model.trim(), setProgress));
     } catch (failure) {
       console.error("[SAIVerse Lite][pack] import failed", failure);
-      setError(failureText(failure));
+      setError(packFailureText(failure));
     } finally {
       setProgress(null);
     }

@@ -589,6 +589,7 @@ export default function App() {
   if (wizard) {
     return <OnboardingWizard
       repository={repository}
+      onImportPack={(file, onProgress) => importPack(file, "provider_mock", "mock-friendly", onProgress)}
       consentAlreadyGiven={settings.consentVersion === LEGAL_VERSION}
       consentOnly={wizard === "consent"}
       onConsent={async () => {

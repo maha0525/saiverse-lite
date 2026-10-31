@@ -80,6 +80,8 @@ export function toolDefinitionsFor(persona: Persona, provider: ProviderConfig): 
 export interface ToolExecutionResult {
   content: string;
   metadata: Record<string, unknown>;
+  /** True when the call changed the persona's memory, which outlives the response it happened in. */
+  durableEffect?: boolean;
 }
 
 function stringArgument(call: ToolCall, name: string): string | undefined {
@@ -88,9 +90,9 @@ function stringArgument(call: ToolCall, name: string): string | undefined {
 }
 
 /** A bad reference is the model's to fix, so it comes back as the result. body: builtin_data/tools/memory_read.py. */
-async function atlasResult(run: () => Promise<string>): Promise<ToolExecutionResult> {
+async function atlasResult(run: () => Promise<ToolExecutionResult>): Promise<ToolExecutionResult> {
   try {
-    return { content: await run(), metadata: {} };
+    return await run();
   } catch (error) {
     if (error instanceof AtlasRefError) return { content: `Error: ${error.message}`, metadata: {} };
     throw error;
@@ -113,17 +115,22 @@ export async function executeTool(
     console.log("[SAIVerse Lite][tool] memory_recall complete", { query, hits: hitCount });
     return { content: text, metadata: { query, hitCount } };
   }
-  if (call.name === "memory_read") return atlasResult(() => readPage(repository, persona.id, stringArgument(call, "ref") ?? ""));
+  if (call.name === "memory_read") {
+    return atlasResult(async () => ({ content: await readPage(repository, persona.id, stringArgument(call, "ref") ?? ""), metadata: {} }));
+  }
   if (call.name === "memory_write") {
     const ref = stringArgument(call, "ref");
     const title = stringArgument(call, "title");
     const category = stringArgument(call, "category");
-    return atlasResult(() => writePage(repository, persona.id, {
-      content: stringArgument(call, "content") ?? "",
-      ...(ref !== undefined ? { ref } : {}),
-      ...(title !== undefined ? { title } : {}),
-      ...(category !== undefined ? { category } : {}),
-    }));
+    return atlasResult(async () => {
+      const { text, written } = await writePage(repository, persona.id, {
+        content: stringArgument(call, "content") ?? "",
+        ...(ref !== undefined ? { ref } : {}),
+        ...(title !== undefined ? { title } : {}),
+        ...(category !== undefined ? { category } : {}),
+      });
+      return { content: text, metadata: {}, durableEffect: written };
+    });
   }
   const prompt = stringArgument(call, "prompt")?.trim() ?? "";
   if (!prompt) throw new Error("画像生成プロンプトが空です");

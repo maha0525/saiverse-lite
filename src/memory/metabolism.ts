@@ -1,9 +1,10 @@
-import type { Persona, PersonaSession } from "../domain";
+import type { ChatMessage, Persona, PersonaSession } from "../domain";
 import type { RetryNotice } from "../llm/retry";
 import type { LlmProvider } from "../llm/types";
+import { withOriginLock } from "../originLock";
 import type { LiteRepository } from "../storage/repository";
 import { compileFold, runBandOverflow, type AuxiliaryLlm } from "./chronicle";
-import { extractAndReflect, recordExtractionFailure, retryExtractionBacklog } from "./entities";
+import { extractAndReflect, finishExtraction, recordExtractionFailure, retryExtractionBacklog } from "./entities";
 import { planEviction } from "./eviction";
 import { buildHeadFields } from "./head";
 import { runSluice } from "./sluice";
@@ -28,7 +29,7 @@ export interface MetabolismOptions {
 }
 
 export type MetabolismOutcome =
-  /** The anchor moved and the head was rebuilt. */
+  /** The run finished. The anchor moved and the head was rebuilt, unless the thread changed or its rows were deleted meanwhile. */
   | "ok"
   /** Nothing was due, or nothing could be folded yet. */
   | "nothing"
@@ -42,23 +43,16 @@ export type MetabolismOutcome =
 const SLUICE_UNSUPPORTED_NOTICE = "このモデルは構造化出力に対応していないため、会話を送る範囲から外す前にコア記憶へ残す工程（スルース）を飛ばしました。";
 const CONSOLIDATION_FAILED_NOTICE = "上位のあらすじの作成に失敗しました。一次あらすじは残っています。次の記憶整理でもう一度試します。";
 
-const runningPersonas = new Set<string>();
-
-/** Keeps runs to one per persona: `navigator.locks` across tabs, the set within this tab when it is missing. */
-async function withPersonaLock<T>(personaId: string, run: () => Promise<T>): Promise<T | "busy"> {
-  if (runningPersonas.has(personaId)) return "busy";
-  runningPersonas.add(personaId);
-  try {
-    const locks = globalThis.navigator?.locks;
-    if (!locks) return await run();
-    return await locks.request(`saiverse-lite-metabolism-${personaId}`, { ifAvailable: true }, (lock) => (lock ? run() : "busy" as const));
-  } finally {
-    runningPersonas.delete(personaId);
-  }
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A row can be deleted during a run. The window's next row takes over; null when none is left. */
+async function firstRemainingRow(repository: LiteRepository, rows: ChatMessage[]): Promise<ChatMessage | null> {
+  for (const row of rows) {
+    if (await repository.getMessage(row.id)) return row;
+  }
+  return null;
 }
 
 async function runLocked(options: MetabolismOptions): Promise<MetabolismOutcome> {
@@ -90,6 +84,7 @@ async function runLocked(options: MetabolismOptions): Promise<MetabolismOutcome>
     await compileFold(repository, persona.id, light, fold, async ({ entryId, messages }) => {
       try {
         await extractAndReflect(repository, persona.id, light, messages, entryId);
+        await finishExtraction(repository, persona.id, entryId);
       } catch (error) {
         console.error("[SAIVerse Lite][metabolism] entity extraction failed; it will be retried", { entryId, error });
         await recordExtractionFailure(repository, persona.id, entryId);
@@ -99,21 +94,21 @@ async function runLocked(options: MetabolismOptions): Promise<MetabolismOutcome>
   }
 
   let notice: string | null = consolidationFailed ? CONSOLIDATION_FAILED_NOTICE : null;
+  let sluiceRan = false;
   if (provider.supportsStructuredOutput) {
     options.onStage?.("残しておきたいことを確かめています…");
-    await runSluice(repository, persona, session, threadId, rows, { provider, model: options.chatModel, ...shared });
-  } else {
-    notice = SLUICE_UNSUPPORTED_NOTICE;
+    sluiceRan = await runSluice(repository, persona, session, threadId, rows, { provider, model: options.chatModel, ...shared });
   }
+  if (!sluiceRan) notice = SLUICE_UNSUPPORTED_NOTICE;
 
   const evicted = plan.folds.reduce((sum, fold) => sum + fold.length, 0);
   // The last row always stays: the anchor has to point at a real row.
-  const newAnchor = rows[Math.min(evicted, rows.length - 1)]!;
-  const head = await buildHeadFields(repository, persona, threadId, newAnchor.id);
+  const newAnchor = await firstRemainingRow(repository, rows.slice(Math.min(evicted, rows.length - 1)));
+  const moved = newAnchor && { ...await buildHeadFields(repository, persona, threadId, newAnchor.id), anchorMessageId: newAnchor.id };
   await repository.updateSession(persona.id, (current): PersonaSession => {
     const outcome = { ...current, metabolismError: null, metabolismNotice: notice };
     // The user can change thread during a run. The entries it compiled stay; the anchor and head were for the old thread.
-    return current.activeThreadId === threadId ? { ...outcome, ...head, anchorMessageId: newAnchor.id } : outcome;
+    return moved && current.activeThreadId === threadId ? { ...outcome, ...moved } : outcome;
   });
   return "ok";
 }
@@ -122,7 +117,7 @@ async function runLocked(options: MetabolismOptions): Promise<MetabolismOutcome>
 export async function runMetabolism(options: MetabolismOptions): Promise<MetabolismOutcome> {
   const { repository, persona, signal } = options;
   try {
-    return await withPersonaLock(persona.id, () => runLocked(options));
+    return await withOriginLock(`saiverse-lite-metabolism-${persona.id}`, () => runLocked(options));
   } catch (error) {
     if (signal?.aborted) return "aborted";
     console.error("[SAIVerse Lite][metabolism] failed", { personaId: persona.id, error });

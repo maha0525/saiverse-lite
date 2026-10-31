@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultPersona, type ToolCall, type ToolId } from "../domain";
+import { createChatMessage, createDefaultPersona, type ToolCall, type ToolId } from "../domain";
 import { MockProvider } from "../llm/mock";
 import { CATEGORY_CORE, liveCoreMemories } from "../pageRecords";
 import { MemoryRepository } from "../storage/memoryRepository";
@@ -68,6 +68,24 @@ describe("memory tools", () => {
     expect(await run("memory_write", { ref: "core", content: "  " })).toBe("Error: content は空にできません。");
     expect(await run("memory_write", { ref: "ch:1", content: "y" })).toContain("chronicle:1 には書けません");
     expect(await run("memory_read", { ref: "task:1" })).toMatch(/^Error: /);
+  });
+
+  it("returns a conversation hit whole, and keeps the page lines short", async () => {
+    const { repository, persona, run } = await setup();
+    const long = `ミケの話。${"長い発言".repeat(100)}\n二行目の結末`;
+    await repository.putMessage(createChatMessage({ id: "row", threadId: "thread", personaId: persona.id, role: "user", content: long, createdAt: 1, seq: 1 }));
+    await run("memory_write", { title: "ミケ", content: "飼い猫".repeat(100) });
+    const text = await run("memory_recall", { query: "ミケ" });
+    expect(text).toContain(`user: ${long}`);
+    expect(text).toMatch(/\] ミケ: (飼い猫)+飼い…\n/);
+  });
+
+  it("caps conversation hits at five", async () => {
+    const { repository, persona, run } = await setup();
+    await repository.writePersonaRecords(persona.id, {
+      messages: Array.from({ length: 8 }, (_, index) => createChatMessage({ id: `row-${index}`, threadId: "thread", personaId: persona.id, role: "user", content: `ミケ${index}`, createdAt: index, seq: index })),
+    });
+    expect(await run("memory_recall", { query: "ミケ" })).toContain("（5 件）");
   });
 
   it("searches pages and conversation by keyword", async () => {

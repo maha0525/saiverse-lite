@@ -1,9 +1,10 @@
 import "fake-indexeddb/auto";
 import { readFileSync } from "node:fs";
 import JSZip from "jszip";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatMessage } from "../domain";
-import { resolveInitialAnchor } from "../memory/window";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createChatMessage, type ChatMessage } from "../domain";
+import { chronicleEntry } from "../memory/entries";
+import { messageTags, resolveInitialAnchor } from "../memory/window";
 import { IndexedDbRepository } from "../storage/indexedDbRepository";
 import { MemoryRepository } from "../storage/memoryRepository";
 import type { LiteRepository, PersonaRecordBatch } from "../storage/repository";
@@ -59,6 +60,8 @@ async function changeManifest(zip: JSZip, change: (manifest: Record<string, unkn
 const withoutFolder = (folder: string) => changedPack((zip) => changeManifest(zip, (manifest) => {
   manifest.contents = (manifest.contents as string[]).filter((item) => item !== folder);
 }));
+
+const encoded = (value: unknown): { __bytes_b64__: string } => ({ __bytes_b64__: Buffer.from(JSON.stringify(value)).toString("base64") });
 
 function options(): PackImportOptions {
   return { providerId: "provider_mock", model: "mock-friendly", resolveInitialAnchor: vi.fn(async () => "m-01") };
@@ -263,19 +266,46 @@ describe("importing the fixture", () => {
     }
   });
 
-  it("keeps the order of one second and leaves wrapped metadata as stored", async () => {
+  it("keeps the order of one second, the pack row in source, and metadata unwrapped", async () => {
     await importPersonaPack(packFile(), repository, store, options());
     const messages = await allMessages(repository);
     const byId = new Map(messages.map((message) => [message.id, message]));
     expect(messages.slice(0, 3).map((message) => message.id)).toEqual(["m-01", "m-02", "m-03"]);
 
-    expect(byId.get("m-11")?.metadata).toEqual({ __raw_text__: "null" });
-    expect(byId.get("m-12")?.metadata).toEqual({ __raw_text__: "{not json" });
-    expect(byId.get("m-13")?.metadata).toEqual({ __escaped__: { __raw_text__: "利用者の文字列" } });
+    expect(byId.get("m-11")?.metadata).toEqual({});
+    expect(byId.get("m-11")?.source?.metadata).toEqual({ __raw_text__: "null" });
+    expect(byId.get("m-12")?.metadata).toEqual({});
+    expect(byId.get("m-12")?.source?.metadata).toEqual({ __raw_text__: "{not json" });
+    // The user's own dict that looks like a wrapper is the value, not a wrapper.
+    expect(byId.get("m-13")?.metadata).toEqual({ __raw_text__: "利用者の文字列" });
+    expect(byId.get("m-13")?.source?.metadata).toEqual({ __escaped__: { __raw_text__: "利用者の文字列" } });
     expect(byId.get("m-14")?.metadata).toEqual({});
     expect(byId.get("m-05")?.metadata).toMatchObject({ __system_notice__: "handy_tool" });
     expect(byId.get("m-02")?.source?.thought_signature).toEqual({ __bytes_b64__: expect.any(String) as string });
     expect(byId.get("m-03")?.content).toBe("  前後の空白も本文  ");
+  });
+
+  it("gives the readers of tags, attachments, Chronicle and keywords the unwrapped value", async () => {
+    const pack = await changedPack(async (zip) => {
+      await changeRows(zip, MESSAGES, (rows) => {
+        for (const row of rows.filter((item) => item.id === "m-01" || item.id === "m-05")) row.metadata = encoded(row.metadata);
+      });
+      await changeRows(zip, "knowledge/pages.json", (rows) => {
+        const entry = rows.find((row) => row.id === "ch-1")!;
+        entry.metadata = encoded(entry.metadata);
+        entry.keywords = encoded(["猫"]);
+      });
+    });
+    await importPersonaPack(pack, repository, store, options());
+
+    const tool = await repository.getMessage("m-05");
+    expect(messageTags(tool!)).toContain("handy_tool");
+    expect(tool?.source?.metadata).toEqual({ __bytes_b64__: expect.any(String) as string });
+    const [image] = (await repository.getMessage("m-01"))?.metadata.images as { uri: string }[];
+    expect((await readAttachment(store, personaId, image!))?.type).toBe("image/png");
+    const page = (await repository.getPage(personaId, "ch-1"))!;
+    expect(chronicleEntry(page)?.level).toBe(1);
+    expect(page.keywords).toEqual(["猫"]);
   });
 
   it("settles the session, with the active thread in place when the anchor is resolved", async () => {
@@ -479,7 +509,8 @@ describe("refusing a pack", () => {
     expect(result.messages).toBe(expected.messages.length - 2);
     expect(result.warnings).toEqual([expect.stringContaining("発言 2件")]);
     expect(await repository.getMessage("m-01")).toBeUndefined();
-    expect((await repository.getMessage("m-03"))?.metadata).toEqual({ __bytes_b64__: btoa('{"tags":[]}') });
+    expect((await repository.getMessage("m-03"))?.metadata).toEqual({ tags: [] });
+    expect((await repository.getMessage("m-03"))?.source?.metadata).toEqual({ __bytes_b64__: btoa('{"tags":[]}') });
   });
 
   it("takes a fragment with no text, as the body does", async () => {
@@ -516,6 +547,49 @@ describe("refusing a pack", () => {
     expect(await repository.getSession(otherId)).toBeUndefined();
     expect(await store.get(otherId)).toBeNull();
     expect(await allMessages(repository)).toHaveLength(expected.messages.length);
+  });
+
+  it.each([
+    ["threads.json", "chatlog/threads.json", { id: "shared_thread" }],
+    ["stelis_threads.json", "chatlog/stelis_threads.json", { thread_id: "shared_thread" }],
+  ])("does not take a thread of another persona named only in %s", async (_name, file, row) => {
+    await repository.putThread({ id: "shared_thread", personaId: "persona_first", title: "ここの会話", createdAt: 1, updatedAt: 1 });
+    const pack = await changedPack((zip) => changeRows(zip, file, (rows) => { rows.push(row); }));
+    await expect(importPersonaPack(pack, repository, store, options())).rejects.toThrow("を削除");
+    await expectNothingWritten();
+    expect((await repository.getThread("shared_thread"))?.personaId).toBe("persona_first");
+  });
+
+  it("holds the same rule in the write, for a row that appeared after the check", async () => {
+    const owned = createChatMessage({ id: "m-03", threadId: "elsewhere", personaId: "persona_first", role: "user", content: "ここの発言", createdAt: 1, seq: 1 });
+    const putPersona = repository.putPersona.bind(repository);
+    vi.spyOn(repository, "putPersona").mockImplementation(async (persona) => {
+      await putPersona(persona);
+      await repository.putMessage(owned);
+    });
+    await expect(importPersonaPack(packFile(), repository, store, options())).rejects.toBeInstanceOf(PackError);
+    expect(await repository.getMessage("m-03")).toEqual(owned);
+    expect(await repository.getMessage("m-01")).toBeUndefined();
+  });
+});
+
+describe("one import at a time", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("refuses a second import while one runs, and takes one again afterwards", async () => {
+    const results = await Promise.allSettled([
+      importPersonaPack(packFile(), repository, store, options()),
+      importPersonaPack(packFile(), new MemoryRepository(), new MemoryPackStore(), options()),
+    ]);
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+    expect((results[1] as PromiseRejectedResult).reason).toBeInstanceOf(PackError);
+    await expect(importPersonaPack(packFile(), repository, store, options())).rejects.toThrow("すでにこの端末");
+  });
+
+  it("refuses while another tab holds the lock", async () => {
+    vi.stubGlobal("navigator", { locks: { request: (_name: string, _options: unknown, run: (lock: null) => unknown) => Promise.resolve(run(null)) } });
+    await expect(importPersonaPack(packFile(), repository, store, options())).rejects.toThrow("別の画面");
+    expect(await repository.getPersona(personaId)).toBeUndefined();
   });
 });
 
@@ -598,6 +672,25 @@ describe("running again", () => {
     await expect(importPersonaPack(other, repository, store, options())).rejects.toThrow("別の ZIP");
     expect(await repository.getSession(personaId)).toMatchObject({ importState: "importing" });
     expect((await store.get(personaId))?.size).toBe(fixture.length);
+  });
+
+  it("tells two ZIPs of the same size and creation time apart by their entries", async () => {
+    const rewritten = (change: (text: string) => string) => changedPack(async (zip) => {
+      zip.file(MESSAGES, change(await zip.file(MESSAGES)!.async("string")));
+    });
+    const first = await rewritten((text) => text);
+    const other = await rewritten((text) => text.replace("paired_action_text", "paired_action_texu"));
+    expect(other.size).toBe(first.size);
+    await expect(importPersonaPack(first, failingRepository(1), store, options())).rejects.toThrow();
+    await expect(importPersonaPack(other, repository, store, options())).rejects.toThrow("別の ZIP");
+    expect(await repository.getSession(personaId)).toMatchObject({ importState: "importing" });
+  });
+
+  it("takes the same files zipped again as the same pack", async () => {
+    await expect(importPersonaPack(packFile(), failingRepository(1), store, options())).rejects.toThrow();
+    const rezipped = await changedPack(() => undefined);
+    await importPersonaPack(rezipped, repository, store, options());
+    expect(await repository.getSession(personaId)).toMatchObject({ importState: "ready" });
   });
 
   it("stops without writing when the persona has finished importing", async () => {

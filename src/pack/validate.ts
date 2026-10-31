@@ -58,15 +58,16 @@ export interface PackCheck {
 
 export type RowProgress = (rowsRead: number) => void;
 
-export interface MessageKey {
-  id: string;
-  threadId: string;
+/** The ids in a pack that are unique across personas once stored. */
+export interface OwnedKeys {
+  threadIds: string[];
+  messageIds: string[];
 }
 
 export interface PackCheckHooks {
   onRows?: RowProgress;
-  /** Sees every message row, some hundreds at a time. A throw refuses the pack. */
-  onMessageKeys?: (keys: MessageKey[]) => Promise<void>;
+  /** Sees the id of every thread and message row, some hundreds at a time. A throw refuses the pack. */
+  onOwnedKeys?: (keys: OwnedKeys) => Promise<void>;
 }
 
 /** body: importer.py _safe_relpath. */
@@ -193,9 +194,24 @@ export async function checkArchive(archive: PackArchive, manifest: PackManifest,
   };
   const has = (folder: string) => manifest.contents.has(folder);
   if (has("chatlog")) {
-    for await (const row of archive.rows(THREADS_FILE, THREAD_REQUIRED)) { void row; seen(); }
-    for await (const row of archive.rows(STELIS_THREADS_FILE, STELIS_THREAD_REQUIRED)) { void row; seen(); }
-    let keys: MessageKey[] = [];
+    let keys: OwnedKeys = { threadIds: [], messageIds: [] };
+    const flushKeys = async (): Promise<void> => {
+      await hooks.onOwnedKeys?.(keys);
+      keys = { threadIds: [], messageIds: [] };
+    };
+    const flushFullKeys = async (): Promise<void> => {
+      if (keys.threadIds.length + keys.messageIds.length >= OWNER_CHECK_ROWS) await flushKeys();
+    };
+    for await (const row of archive.rows(THREADS_FILE, THREAD_REQUIRED)) {
+      keys.threadIds.push(String(row.id));
+      await flushFullKeys();
+      seen();
+    }
+    for await (const row of archive.rows(STELIS_THREADS_FILE, STELIS_THREAD_REQUIRED)) {
+      keys.threadIds.push(String(row.thread_id));
+      await flushFullKeys();
+      seen();
+    }
     for await (const row of archive.rows(MESSAGES_FILE, MESSAGE_REQUIRED)) {
       const columns = refusedJsonTextColumns(row, MESSAGE_JSON_COLUMNS);
       if (columns.length) {
@@ -204,14 +220,12 @@ export async function checkArchive(archive: PackArchive, manifest: PackManifest,
       } else {
         counts.messages += 1;
       }
-      keys.push({ id: String(row.id), threadId: String(row.thread_id) });
-      if (keys.length >= OWNER_CHECK_ROWS) {
-        await hooks.onMessageKeys?.(keys);
-        keys = [];
-      }
+      keys.threadIds.push(String(row.thread_id));
+      keys.messageIds.push(String(row.id));
+      await flushFullKeys();
       seen();
     }
-    if (keys.length) await hooks.onMessageKeys?.(keys);
+    await flushKeys();
   }
   if (has("knowledge")) {
     for await (const row of archive.rows(PAGES_FILE, PAGE_REQUIRED)) {

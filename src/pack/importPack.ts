@@ -1,6 +1,7 @@
 import type { ChatMessage, ConversationThread, FragmentRecord, PageRecord, Persona, PersonaSession, ToolId } from "../domain";
+import { withOriginLock } from "../originLock";
 import { createPersonaSession, createTrunkPages, epochSeconds } from "../pageRecords";
-import type { LiteRepository, PersonaRecordBatch } from "../storage/repository";
+import { RowOwnerError, type LiteRepository, type PersonaRecordBatch } from "../storage/repository";
 import { PackArchive } from "./archive";
 import { PackError, decodeText, isObject, refusedJsonTextColumns } from "./format";
 import type { PackStore } from "./packStore";
@@ -22,11 +23,12 @@ import {
   THREAD_REQUIRED,
   checkArchive,
   readManifest,
-  type MessageKey,
+  type OwnedKeys,
   type PackCheck,
   type PackManifest,
 } from "./validate";
 
+const IMPORT_LOCK = "saiverse-lite-pack-import";
 const BATCH_ROWS = 300;
 /** Rows are held in IndexedDB with their `source` beside them. */
 const STORED_BYTES_PER_JSON_BYTE = 2;
@@ -133,16 +135,6 @@ function chooseActiveThread(personaId: string, suffix: string | null, threads: C
   return candidates.reduce<ConversationThread | null>((latest, thread) => (latest && latest.updatedAt >= thread.updatedAt ? latest : thread), null)?.id ?? null;
 }
 
-async function isSamePack(stored: Blob, file: Blob, manifest: PackManifest): Promise<boolean> {
-  if (stored.size !== file.size) return false;
-  const archive = await PackArchive.open(stored);
-  try {
-    return (await readManifest(archive)).createdAt === manifest.createdAt;
-  } finally {
-    await archive.close();
-  }
-}
-
 async function checkStorage(packStore: PackStore, file: Blob, archive: PackArchive): Promise<void> {
   const free = await packStore.freeBytes();
   if (free === null) return;
@@ -154,21 +146,25 @@ async function checkStorage(packStore: PackStore, file: Blob, archive: PackArchi
   }
 }
 
+async function ownerRefusal(repository: LiteRepository, owner: string): Promise<PackError> {
+  const name = (await repository.getPersona(owner))?.name ?? owner;
+  return new PackError(`このパックの会話は、すでにこの端末にいる${name}の会話と重なっています。入れ直すときは、先に${name}を削除してください。`);
+}
+
 /**
  * Messages and threads are stored by their id alone, and the body keeps message ids when it
  * gives a persona a new persona_id. Writing such a pack would take the rows from the persona
- * already here, so it is refused before anything is written.
+ * already here, so it is refused before anything is written. `writePersonaRecords` holds the
+ * same rule inside each write's transaction.
  */
-async function refuseRowsOfAnotherPersona(repository: LiteRepository, personaId: string, keys: MessageKey[]): Promise<void> {
-  const threadIds = [...new Set(keys.map((key) => key.threadId))];
+async function refuseRowsOfAnotherPersona(repository: LiteRepository, personaId: string, keys: OwnedKeys): Promise<void> {
+  const threadIds = [...new Set(keys.threadIds)];
   const [messages, threads] = await Promise.all([
-    Promise.all(keys.map((key) => repository.getMessage(key.id))),
+    Promise.all(keys.messageIds.map((id) => repository.getMessage(id))),
     Promise.all(threadIds.map((id) => repository.getThread(id))),
   ]);
   const owner = [...messages, ...threads].find((row) => row && row.personaId !== personaId)?.personaId;
-  if (owner === undefined) return;
-  const name = (await repository.getPersona(owner))?.name ?? owner;
-  throw new PackError(`このパックの会話は、すでにこの端末にいる${name}の会話と重なっています。入れ直すときは、先に${name}を削除してください。`);
+  if (owner !== undefined) throw await ownerRefusal(repository, owner);
 }
 
 function refusalWarnings({ refused }: PackCheck): string[] {
@@ -220,7 +216,13 @@ async function writeRecords(
     for await (const row of archive.rows(STELIS_THREADS_FILE, STELIS_THREAD_REQUIRED)) stelisRows.set(String(row.thread_id), row);
   }
 
-  const writeBatch = (batch: PersonaRecordBatch) => repository.writePersonaRecords(personaId, batch);
+  const writeBatch = async (batch: PersonaRecordBatch): Promise<void> => {
+    try {
+      await repository.writePersonaRecords(personaId, batch);
+    } catch (error) {
+      throw error instanceof RowOwnerError ? await ownerRefusal(repository, error.ownerPersonaId) : error;
+    }
+  };
   const messages = new BatchWriter<ChatMessage>((rows) => writeBatch({ messages: rows }), (done) => onProgress({ stage: "messages", done, total: counts.messages }));
   if (has("chatlog")) {
     let ordinal = 0;
@@ -280,7 +282,7 @@ async function writeRecords(
  * Brings a body persona into Lite: docs/memory_core.md「パックの取り込み」. Nothing is written
  * until the whole pack has passed the checks. The session says `importing` from the first
  * write on, so a stop leaves a persona that cannot be talked to, and choosing the same ZIP
- * again replaces every row by its ID and finishes.
+ * again replaces every row by its ID and finishes. One import runs at a time in this origin.
  */
 export async function importPersonaPack(
   file: Blob,
@@ -288,6 +290,18 @@ export async function importPersonaPack(
   packStore: PackStore,
   options: PackImportOptions,
   onProgress: (progress: PackImportProgress) => void = () => undefined,
+): Promise<PackImportResult> {
+  const result = await withOriginLock(IMPORT_LOCK, () => runImport(file, repository, packStore, options, onProgress));
+  if (result === "busy") throw new PackError("別の画面で取り込みが進んでいます。終わってから、もう一度選んでください。");
+  return result;
+}
+
+async function runImport(
+  file: Blob,
+  repository: LiteRepository,
+  packStore: PackStore,
+  options: PackImportOptions,
+  onProgress: (progress: PackImportProgress) => void,
 ): Promise<PackImportResult> {
   const unavailable = await packStore.unavailableReason();
   if (unavailable) throw new PackError(unavailable);
@@ -301,25 +315,26 @@ export async function importPersonaPack(
     const existingSession = await repository.getSession(personaId);
     const resuming = existingSession?.importState === "importing";
     if (existingPersona && !resuming) throw new PackError(`${existingPersona.name}はすでにこの端末にいます。入れ直すときは、先にパートナーを削除してください。`);
+    const importFingerprint = await archive.fingerprint();
+    if (resuming && existingSession?.importFingerprint !== importFingerprint) {
+      throw new PackError(`${existingPersona?.name ?? personaId}の取り込みは別の ZIP で途中まで進んでいます。同じ ZIP を選ぶか、先にパートナーを削除してください。`);
+    }
 
     const check = await checkArchive(archive, manifest, {
       onRows: (done) => onProgress({ stage: "checking", done, total: null }),
-      onMessageKeys: (keys) => refuseRowsOfAnotherPersona(repository, personaId, keys),
+      onOwnedKeys: (keys) => refuseRowsOfAnotherPersona(repository, personaId, keys),
     });
     const warnings = refusalWarnings(check);
     const profile = await readProfile(archive, manifest, warnings);
 
     onProgress({ stage: "saving", done: 0, total: null });
     const stored = resuming ? await packStore.get(personaId) : null;
-    if (resuming && stored && !await isSamePack(stored, file, manifest)) {
-      throw new PackError(`${existingPersona?.name ?? personaId}の取り込みは別の ZIP で途中まで進んでいます。同じ ZIP を選ぶか、先にパートナーを削除してください。`);
-    }
     if (!resuming) await checkStorage(packStore, file, archive);
     if (!stored) await packStore.put(personaId, file);
 
     const nowMs = Date.now();
     // The session comes first: with it in place, putPersona leaves the trunk pages to this import.
-    const session: PersonaSession = { ...(existingSession ?? createPersonaSession(personaId)), importState: "importing" };
+    const session: PersonaSession = { ...(existingSession ?? createPersonaSession(personaId)), importState: "importing", importFingerprint };
     await repository.putSession(session);
     const persona: Persona = {
       id: personaId,

@@ -3,7 +3,7 @@ import type { ProviderConfig } from "../domain";
 import { AnthropicProvider } from "./anthropic";
 import { GeminiProvider } from "./gemini";
 import { OpenAiProvider } from "./openai";
-import type { ProviderEvent, ProviderRequest } from "./types";
+import { ProviderHttpError, StructuredOutputRefusedError, type CompletionRequest, type ProviderEvent, type ProviderRequest } from "./types";
 
 function config(kind: ProviderConfig["kind"]): ProviderConfig {
   return {
@@ -47,6 +47,41 @@ async function collectEvents(stream: AsyncGenerator<ProviderEvent>): Promise<Pro
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("structured output on an OpenAI compatible server", () => {
+  const structured = (): CompletionRequest => ({
+    model: "test-model", systemPrompt: "", memoryContext: "", messages: [user("x")],
+    responseSchema: { type: "object", properties: { reflection: { type: "string" } } },
+  });
+  const answering = (status: number): void => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "nope" } }), { status })));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  };
+
+  it.each([400, 422, 501])("reads HTTP %i as a refusal", async (status) => {
+    answering(status);
+    await expect(new OpenAiProvider(config("openai-compatible")).complete(structured())).rejects.toBeInstanceOf(StructuredOutputRefusedError);
+  });
+
+  it("keeps an authentication failure a failure", async () => {
+    answering(401);
+    const failure = await new OpenAiProvider(config("openai-compatible")).complete(structured()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderHttpError);
+  });
+
+  it("keeps a 400 a failure when no schema was asked for", async () => {
+    answering(400);
+    const { responseSchema: _schema, ...plain } = structured();
+    const failure = await new OpenAiProvider(config("openai-compatible")).complete(plain).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderHttpError);
+  });
+
+  it("keeps a 400 from OpenAI itself a failure", async () => {
+    answering(400);
+    const failure = await new OpenAiProvider(config("openai")).complete(structured()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderHttpError);
+  });
 });
 
 describe("Gemini tool-call round trip", () => {

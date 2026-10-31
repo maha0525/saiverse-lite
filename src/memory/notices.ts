@@ -6,7 +6,7 @@ import type { ProviderMessage } from "../llm/types";
 
 export const SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER = "{{SYSTEM_NOTICE_PASSPHRASE}}";
 
-const PASSPHRASE_LENGTH = 12;
+export const PASSPHRASE_LENGTH = 12;
 const PASSPHRASE_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 export function generatePassphrase(): string {
@@ -42,7 +42,7 @@ export function noticeMessage(body: string, passphrase: string): ProviderMessage
 }
 
 /** `encrypted_content` is opaque to Lite and breaks if rewritten. body: `_redact_reasoning_details` keeps signatures too. */
-function redactValue(value: unknown, passphrase: string): unknown {
+export function redactValue(value: unknown, passphrase: string): unknown {
   if (typeof value === "string") return redactPassphrase(value, passphrase);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, passphrase));
   if (typeof value !== "object" || value === null) return value;

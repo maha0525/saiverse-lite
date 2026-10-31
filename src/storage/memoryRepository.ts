@@ -22,7 +22,7 @@ import {
   epochSeconds,
   type CoreMemoryDraft,
 } from "../pageRecords";
-import { assertBatchOwner, type LiteRepository, type MessageRange, type PersonaRecordBatch } from "./repository";
+import { assertBatchOwner, RowOwnerError, type LiteRepository, type MessageRange, type PersonaRecordBatch } from "./repository";
 
 function byUpdatedDesc<T extends { updatedAt: number }>(a: T, b: T): number {
   return b.updatedAt - a.updatedAt;
@@ -101,25 +101,19 @@ export class MemoryRepository implements LiteRepository {
     if (targetIds.size === 0) return;
     const personaIds = new Set([...targetIds].flatMap((id) => this.threads.get(id)?.personaId ?? []));
     for (const id of targetIds) this.threads.delete(id);
-    const deletedMessageIds = new Set<string>();
+    let deletedMessages = 0;
     for (const message of [...this.messages.values()]) {
       if (!targetIds.has(message.threadId)) continue;
       this.messages.delete(message.id);
-      deletedMessageIds.add(message.id);
+      deletedMessages += 1;
     }
     for (const personaId of personaIds) {
       const session = this.sessions.get(personaId);
-      if (!session) continue;
-      const threadGone = session.activeThreadId !== null && targetIds.has(session.activeThreadId);
-      const anchorGone = session.anchorMessageId !== null && deletedMessageIds.has(session.anchorMessageId);
-      if (!threadGone && !anchorGone) continue;
-      this.sessions.set(personaId, {
-        ...session,
-        activeThreadId: threadGone ? null : session.activeThreadId,
-        anchorMessageId: threadGone || anchorGone ? null : session.anchorMessageId,
-      });
+      if (session?.activeThreadId && targetIds.has(session.activeThreadId)) {
+        this.sessions.set(personaId, { ...session, activeThreadId: null, anchorMessageId: null });
+      }
     }
-    console.info("[SAIVerse Lite][storage] Threads deleted", { deletedThreads: targetIds.size, deletedMessages: deletedMessageIds.size });
+    console.info("[SAIVerse Lite][storage] Threads deleted", { deletedThreads: targetIds.size, deletedMessages });
   }
 
   async listMessages(threadId: string): Promise<ChatMessage[]> {
@@ -137,11 +131,8 @@ export class MemoryRepository implements LiteRepository {
   }
   async putMessage(value: ChatMessage): Promise<void> { this.messages.set(value.id, structuredClone(value)); }
   async deleteMessage(id: string): Promise<void> {
-    const message = this.messages.get(id);
-    const deleted = this.messages.delete(id);
-    const session = message ? this.sessions.get(message.personaId) : undefined;
-    if (session?.anchorMessageId === id) this.sessions.set(session.personaId, { ...session, anchorMessageId: null });
-    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted });
+    this.messages.delete(id);
+    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id });
   }
   async nextMessageSeq(personaId: string): Promise<number> {
     let highest = 0;
@@ -208,10 +199,19 @@ export class MemoryRepository implements LiteRepository {
 
   async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
     assertBatchOwner(personaId, batch);
+    const existing = [
+      ...(batch.threads ?? []).map((thread) => this.threads.get(thread.id)),
+      ...(batch.messages ?? []).map((message) => this.messages.get(message.id)),
+    ];
+    const foreign = existing.find((row) => row && row.personaId !== personaId);
+    if (foreign) throw new RowOwnerError(foreign.personaId);
+    const session = this.sessions.get(personaId);
+    if (batch.session && !session) throw new Error(`Session not found: ${personaId}`);
     for (const thread of batch.threads ?? []) await this.putThread(thread);
     for (const message of batch.messages ?? []) await this.putMessage(message);
     for (const page of batch.pages ?? []) await this.putPage(page);
     for (const fragment of batch.fragments ?? []) await this.putFragment(fragment);
+    if (batch.session && session) await this.putSession(batch.session(structuredClone(session)));
   }
 
   async listProviders(): Promise<ProviderConfig[]> { return [...this.providers.values()].sort((a, b) => a.label.localeCompare(b.label)); }

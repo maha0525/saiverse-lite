@@ -1,14 +1,193 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService } from "./chatService";
 import { ChatOperationError, PersonaImportingError, presentChatError } from "./chatErrors";
-import { createChatMessage, createDefaultPersona, newId, type ChatMessage, type ConversationThread } from "./domain";
+import { createChatMessage, createDefaultPersona, handyToolRecord, newId, type ChatMessage, type ConversationThread } from "./domain";
+import { MockProvider } from "./llm/mock";
 import { retryDefaults } from "./llm/retry";
+import type { ProviderEvent } from "./llm/types";
 import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
 import { MemoryRepository } from "./storage/memoryRepository";
 
 const originalRetry = { ...retryDefaults };
 beforeEach(() => { retryDefaults.initialDelayMs = 1; retryDefaults.maxDelayMs = 5; });
-afterEach(() => { Object.assign(retryDefaults, originalRetry); vi.unstubAllGlobals(); });
+afterEach(() => { Object.assign(retryDefaults, originalRetry); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+/** One stream per response round, in order. An Error throws from that round. */
+function scriptRounds(...rounds: Array<ProviderEvent[] | Error>): void {
+  let next = 0;
+  vi.spyOn(MockProvider.prototype, "stream").mockImplementation(async function* () {
+    const round = rounds[next] ?? new Error("no more rounds");
+    next += 1;
+    await Promise.resolve();
+    if (round instanceof Error) throw round;
+    yield* round;
+  });
+}
+
+function toolCall(name: "memory_write" | "memory_recall" | "memory_read", args: Record<string, unknown>): ProviderEvent {
+  return { type: "tool-call", call: { id: newId("call"), name, arguments: args } };
+}
+
+async function conversation() {
+  const repository = new MemoryRepository();
+  await repository.initialize();
+  const persona = createDefaultPersona();
+  const now = Date.now();
+  const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
+  await repository.putThread(thread);
+  return { repository, persona, thread };
+}
+
+const WRITE_CORE = toolCall("memory_write", { ref: "core", content: "猫の名前はミケ" });
+
+describe("a response that fails after changing the persona's memory", () => {
+  it("keeps the turn's rows and reports the failure", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([WRITE_CORE], new Error("通信が切れました"));
+    const failure = await new ChatService(repository).send(persona, thread, "覚えて").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ChatOperationError);
+    expect((failure as ChatOperationError).keptTurn).toBe(true);
+    expect(presentChatError(failure, "send").message).toContain("履歴に残しています");
+    expect((await repository.listMessages(thread.id)).map((message) => message.role)).toEqual(["user", "system"]);
+    expect((await repository.getThread(thread.id))?.title).toBe("覚えて");
+    expect(liveCoreMemories(await repository.listPages(persona.id, CATEGORY_CORE)).map((page) => page.content)).toEqual(["猫の名前はミケ"]);
+  });
+
+  it("does the same when the tool rounds run out", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([WRITE_CORE], [toolCall("memory_read", { ref: "core" })], [toolCall("memory_read", { ref: "core" })], [toolCall("memory_read", { ref: "core" })]);
+    const failure = await new ChatService(repository).send(persona, thread, "覚えて").catch((error: unknown) => error);
+    expect((failure as ChatOperationError).keptTurn).toBe(true);
+    expect(await repository.listMessages(thread.id)).toHaveLength(5);
+  });
+
+  it("does the same when nothing is said after the write", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([WRITE_CORE], []);
+    const failure = await new ChatService(repository).send(persona, thread, "覚えて").catch((error: unknown) => error);
+    expect((failure as ChatOperationError).keptTurn).toBe(true);
+    expect((await repository.listMessages(thread.id)).map((message) => message.role)).toEqual(["user", "system"]);
+  });
+
+  it("keeps the old response beside the new rows when regenerating", async () => {
+    const { repository, persona, thread } = await conversation();
+    const service = new ChatService(repository);
+    await service.send(persona, thread, "こんにちは");
+    scriptRounds([WRITE_CORE], new Error("通信が切れました"));
+    const failure = await service.regenerate(persona, thread.id).catch((error: unknown) => error);
+    expect((failure as ChatOperationError).keptTurn).toBe(true);
+    expect(presentChatError(failure, "regenerate").message).toContain("どちらも");
+    expect((await repository.listMessages(thread.id)).map((message) => message.role)).toEqual(["user", "assistant", "system"]);
+  });
+
+  it("rolls back as before when the tools changed nothing", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([toolCall("memory_recall", { query: "猫" })], [toolCall("memory_write", { ref: "c:9", content: "無い記憶" })], new Error("通信が切れました"));
+    const failure = await new ChatService(repository).send(persona, thread, "覚えて").catch((error: unknown) => error);
+    expect((failure as ChatOperationError).keptTurn).toBe(false);
+    expect(await repository.listMessages(thread.id)).toEqual([]);
+    expect(await repository.getThread(thread.id)).toEqual(thread);
+  });
+});
+
+describe("the final response", () => {
+  it("is not a tool row left by an earlier round", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([toolCall("memory_read", { ref: "core" })], []);
+    const failure = await new ChatService(repository).send(persona, thread, "読んで").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ChatOperationError);
+    expect((failure as ChatOperationError).originalError).toMatchObject({ message: "モデルの応答が空でした" });
+    expect(await repository.listMessages(thread.id)).toEqual([]);
+  });
+
+  it("is not words said before the tool call", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([{ type: "text", text: "調べます" }, toolCall("memory_read", { ref: "core" })], [{ type: "text", text: "  " }]);
+    await expect(new ChatService(repository).send(persona, thread, "読んで")).rejects.toBeInstanceOf(ChatOperationError);
+    expect(await repository.listMessages(thread.id)).toEqual([]);
+  });
+
+  it("is what the last round said", async () => {
+    const { repository, persona, thread } = await conversation();
+    scriptRounds([{ type: "text", text: "調べます" }, toolCall("memory_read", { ref: "core" })], [{ type: "text", text: "ありませんでした" }]);
+    const result = await new ChatService(repository).send(persona, thread, "読んで");
+    expect(result).toMatchObject({ role: "assistant", content: "ありませんでした" });
+  });
+});
+
+describe("regenerating", () => {
+  function row(thread: ConversationThread, seq: number, fields: Pick<ChatMessage, "role" | "content"> & Partial<ChatMessage>): ChatMessage {
+    return createChatMessage({ id: `row-${String(seq).padStart(4, "0")}`, threadId: thread.id, personaId: thread.personaId, createdAt: 1_000 + seq, seq, ...fields });
+  }
+
+  it("reads back past any number of rows to find the response and all of its pulse", async () => {
+    const { repository, persona, thread } = await conversation();
+    const tool = handyToolRecord("memory_read", "結果");
+    await repository.writePersonaRecords(persona.id, {
+      messages: [
+        row(thread, 1, { role: "user", content: "前の質問", pulseId: "pulse-old" }),
+        row(thread, 2, { role: "assistant", content: "前の返答", pulseId: "pulse-old" }),
+        row(thread, 3, { role: "user", content: "質問", pulseId: "pulse-last" }),
+        ...Array.from({ length: 300 }, (_, index) => row(thread, 4 + index, { ...tool, pulseId: "pulse-last" })),
+        row(thread, 304, { role: "assistant", content: "返答", pulseId: "pulse-last" }),
+        ...Array.from({ length: 700 }, (_, index) => row(thread, 305 + index, { ...tool, pulseId: "pulse-last" })),
+      ],
+    });
+    await new ChatService(repository).regenerate(persona, thread.id);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored.map((message) => message.content.slice(0, 5))).toEqual(["前の質問", "前の返答", "質問", "モック応答"]);
+    expect(stored.at(-1)?.pulseId).toBe("pulse-last");
+  });
+
+  it("takes every row after the last user row when v1 rows have no pulse", async () => {
+    const { repository, persona, thread } = await conversation();
+    await repository.writePersonaRecords(persona.id, {
+      messages: [
+        row(thread, 1, { role: "user", content: "質問" }),
+        row(thread, 2, { role: "system", content: "途中の通知" }),
+        row(thread, 3, { role: "assistant", content: "一つ目" }),
+        row(thread, 4, { role: "assistant", content: "二つ目" }),
+        row(thread, 5, { role: "assistant", content: "" }),
+      ],
+    });
+    await new ChatService(repository).regenerate(persona, thread.id);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored).toHaveLength(2);
+    expect(stored[0]?.content).toBe("質問");
+    expect(stored[1]?.content).toContain("モック応答");
+  });
+
+  it("orders rows of one moment by seq, then id, which is what the backward read must give", async () => {
+    const { repository, persona, thread } = await conversation();
+    const moment = (seq: number, id: string, fields: Pick<ChatMessage, "role" | "content">) => ({ ...row(thread, seq, fields), id, createdAt: 5_000, pulseId: `pulse-${seq}` });
+    const rows = [
+      moment(1, "row-a", { role: "user", content: "最初" }),
+      moment(2, "row-c", { role: "assistant", content: "最初の返答" }),
+      moment(3, "row-b", { role: "user", content: "次" }),
+      moment(3, "row-d", { role: "assistant", content: "次の返答" }),
+    ];
+    await repository.writePersonaRecords(persona.id, { messages: [...rows].reverse() });
+    const backward = await repository.readThreadMessages(thread.id, { direction: "backward", limit: 10 });
+    expect(backward.map((message) => message.id)).toEqual(["row-d", "row-b", "row-c", "row-a"]);
+    await new ChatService(repository).regenerate(persona, thread.id);
+    expect((await repository.listMessages(thread.id)).map((message) => message.content)).toEqual(["最初", "最初の返答", "次", expect.stringContaining("モック応答")]);
+  });
+
+  it("leaves an older response alone when the last user row has no reply yet, and answers that row", async () => {
+    const { repository, persona, thread } = await conversation();
+    await repository.writePersonaRecords(persona.id, {
+      messages: [
+        row(thread, 1, { role: "user", content: "前の質問", pulseId: "pulse-old" }),
+        row(thread, 2, { role: "assistant", content: "前の返答", pulseId: "pulse-old" }),
+        row(thread, 3, { role: "user", content: "未回答の質問", pulseId: "pulse-last" }),
+      ],
+    });
+    await new ChatService(repository).regenerate(persona, thread.id);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored.map((message) => message.content.slice(0, 4))).toEqual(["前の質問", "前の返答", "未回答の", "モック応"]);
+    expect(stored.at(-1)?.pulseId).toBe("pulse-last");
+  });
+});
 
 describe("ChatService with mock provider", () => {
   it("streams and persists without generating Lite-specific summaries", async () => {

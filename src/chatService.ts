@@ -1,5 +1,4 @@
 import {
-  createChatMessage,
   handyToolRecord,
   newId,
   withMemoryTools,
@@ -14,12 +13,12 @@ import { ChatOperationError, PersonaImportingError, type ChatOperation } from ".
 import { createProvider } from "./llm";
 import type { RetryAttempt, RetryNotice } from "./llm/retry";
 import type { LlmProvider, ProviderMessage } from "./llm/types";
-import { composeMessages, realtimeText } from "./memory/conversation";
+import { composeMessages, newConversationRow, realtimeText } from "./memory/conversation";
 import { runMetabolism, type MetabolismOutcome } from "./memory/metabolism";
-import { presentHead, redactPassphrase, redactProviderMessage } from "./memory/notices";
+import { presentHead, redactProviderMessage } from "./memory/notices";
 import { runAutoRecall } from "./memory/recall";
 import { prepareSession } from "./memory/session";
-import { windowNeedsMetabolism } from "./memory/window";
+import { walkThread, windowNeedsMetabolism } from "./memory/window";
 import { requiresApiKey, resolveLightModel } from "./providerDefaults";
 import type { LiteRepository } from "./storage/repository";
 import { executeTool, toolDefinitionsFor } from "./tools";
@@ -51,8 +50,6 @@ const TOOL_STATUS: Record<ToolId, string> = {
 };
 
 const MAX_TOOL_ROUNDS = 4;
-/** The rows regenerating looks at to find the last response. */
-const REGENERATE_LOOKBACK = 200;
 
 /**
  * The provider is retrying on its own, so the wait is expected rather than a
@@ -71,6 +68,19 @@ function retryStatusText(providerLabel: string, attempt: RetryAttempt): string {
 
 function usageMetadata(inputTokens: number, outputTokens: number, cachedTokens: number): Record<string, unknown> {
   return { inputTokens, outputTokens, cachedTokens };
+}
+
+/** What one response has left in storage so far, for deciding what a failure undoes. */
+interface ResponseTurn {
+  createdIds: string[];
+  /** A tool changed the persona's memory. The rows are the record of that change, so they stay. */
+  durableEffect: boolean;
+}
+
+interface ReplacedResponse {
+  /** The rows a new response takes the place of. */
+  rows: ChatMessage[];
+  pulseId: string | null;
 }
 
 interface MetabolismRun {
@@ -97,14 +107,16 @@ export class ChatService {
   private async rollbackConversation(
     operation: ChatOperation,
     thread: ConversationThread,
-    createdIds: string[],
+    turn: ResponseTurn,
     removedMessages: ChatMessage[],
     originalError: unknown,
   ): Promise<ChatOperationError> {
+    const { createdIds, durableEffect } = turn;
     let rollbackError: unknown = null;
     try {
-      for (const id of createdIds) await this.repository.deleteMessage(id);
       for (const message of removedMessages) await this.repository.putMessage(message);
+      if (durableEffect) return new ChatOperationError(operation, originalError, true, null, true);
+      for (const id of createdIds) await this.repository.deleteMessage(id);
       await this.repository.putThread(thread);
       // A page surfaced for a turn that never happened has to surface again when the user resends.
       const created = new Set(createdIds);
@@ -129,7 +141,7 @@ export class ChatService {
         error,
       });
     }
-    return new ChatOperationError(operation, originalError, rollbackError === null, rollbackError);
+    return new ChatOperationError(operation, originalError, rollbackError === null, rollbackError, durableEffect);
   }
 
   async send(
@@ -142,25 +154,24 @@ export class ChatService {
     await this.assertNotImporting(persona.id);
     const now = Date.now();
     const pulseId = newId("pulse");
-    const created: string[] = [];
+    const turn: ResponseTurn = { createdIds: [], durableEffect: false };
     try {
-      const userMessage = createChatMessage({
+      const userMessage = await newConversationRow(this.repository, {
         id: newId("message"),
         threadId: thread.id,
         personaId: persona.id,
         role: "user",
         content: content.trim(),
         createdAt: now,
-        seq: await this.repository.nextMessageSeq(persona.id),
         pulseId,
       });
       await this.repository.putMessage(userMessage);
-      created.push(userMessage.id);
+      turn.createdIds.push(userMessage.id);
       await this.repository.putThread({ ...thread, updatedAt: now, title: thread.title === "新しい会話" ? content.trim().slice(0, 36) || thread.title : thread.title });
       callbacks.onUserMessageStored?.(userMessage);
-      return await this.continueConversation(persona, thread.id, pulseId, callbacks, created, signal);
+      return await this.continueConversation(persona, thread.id, pulseId, callbacks, turn, signal);
     } catch (error) {
-      throw await this.rollbackConversation("send", thread, created, [], error);
+      throw await this.rollbackConversation("send", thread, turn, [], error);
     }
   }
 
@@ -173,19 +184,39 @@ export class ChatService {
     await this.assertNotImporting(persona.id);
     const thread = await this.repository.getThread(threadId);
     if (!thread) throw new Error("会話スレッドが見つかりません");
-    const created: string[] = [];
+    const turn: ResponseTurn = { createdIds: [], durableEffect: false };
     const removed: ChatMessage[] = [];
     try {
-      const recent = await this.repository.readThreadMessages(threadId, { direction: "backward", limit: REGENERATE_LOOKBACK });
-      // A blank row is a tool turn the screen does not show; it is not the response the user is replacing.
-      const last = recent.find((message) => message.role === "assistant" && message.content.trim() !== "");
-      // The tool rows belong to the response being replaced.
-      if (last) removed.push(...(last.pulseId ? recent.filter((message) => message.pulseId === last.pulseId && message.role !== "user") : [last]));
+      const replaced = await this.lastResponse(threadId);
+      removed.push(...replaced.rows);
       for (const message of removed) await this.repository.deleteMessage(message.id);
-      return await this.continueConversation(persona, threadId, last?.pulseId ?? newId("pulse"), callbacks, created, signal);
+      return await this.continueConversation(persona, threadId, replaced.pulseId ?? newId("pulse"), callbacks, turn, signal);
     } catch (error) {
-      throw await this.rollbackConversation("regenerate", thread, created, removed, error);
+      throw await this.rollbackConversation("regenerate", thread, turn, removed, error);
     }
+  }
+
+  /**
+   * The response after the last user row, read as far back as that row is. The rows of its
+   * pulse belong to it, tool rows included; v1 rows have no pulse, so they all do. A blank
+   * row is a tool turn the screen does not show, never the response the user is replacing.
+   */
+  private async lastResponse(threadId: string): Promise<ReplacedResponse> {
+    const afterUser: ChatMessage[] = [];
+    let lastUser: ChatMessage | null = null;
+    for await (const row of walkThread(this.repository, threadId, "backward")) {
+      if (row.role === "user") {
+        lastUser = row;
+        break;
+      }
+      afterUser.push(row);
+    }
+    const last = afterUser.find((message) => message.role === "assistant" && message.content.trim() !== "");
+    if (!last) return { rows: [], pulseId: lastUser?.pulseId ?? null };
+    return {
+      rows: last.pulseId ? afterUser.filter((message) => message.pulseId === last.pulseId) : afterUser,
+      pulseId: last.pulseId,
+    };
   }
 
   private async assertNotImporting(personaId: string): Promise<void> {
@@ -241,7 +272,7 @@ export class ChatService {
     threadId: string,
     pulseId: string,
     callbacks: ChatCallbacks,
-    created: string[],
+    turn: ResponseTurn,
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
     const persona = withMemoryTools(personaInput);
@@ -268,21 +299,19 @@ export class ChatService {
     const systemPrompt = presentHead(session.headText ?? "", passphrase);
 
     const store = async (fields: Pick<ChatMessage, "role" | "content" | "metadata">): Promise<ChatMessage> => {
-      const message = createChatMessage({
+      const message = await newConversationRow(this.repository, {
         ...fields,
         id: newId("message"),
         threadId,
         personaId: persona.id,
         createdAt: Date.now(),
-        seq: await this.repository.nextMessageSeq(persona.id),
         pulseId,
       });
       await this.repository.putMessage(message);
-      created.push(message.id);
+      turn.createdIds.push(message.id);
       return message;
     };
 
-    let lastStored: ChatMessage | null = null;
     let finalMessage: ChatMessage | null = null;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const baseStatus = round === 0 ? "応答を待っています…" : "ツールの結果を渡しています…";
@@ -329,10 +358,11 @@ export class ChatService {
 
       const metadata = { usage: usageMetadata(inputTokens, outputTokens, cachedTokens) };
       // An empty assistant row is never kept: some providers reject empty turns.
-      if (text) lastStored = await store({ role: "assistant", content: redactPassphrase(text, passphrase), metadata });
+      const said = text.trim() ? await store({ role: "assistant", content: text, metadata }) : null;
       if (calls.length === 0) {
-        finalMessage = lastStored;
-        if (!finalMessage) throw new Error("モデルの応答が空でした");
+        // Only this round's words answer the user. A row from before a tool call is not an answer.
+        if (!said) throw new Error("モデルの応答が空でした");
+        finalMessage = said;
         break;
       }
       // The call itself stays in memory for the rest of this response.
@@ -354,12 +384,13 @@ export class ChatService {
           });
           resultContent = result.content;
           resultMetadata = result.metadata;
+          if (result.durableEffect) turn.durableEffect = true;
         } catch (error) {
           resultContent = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
           resultMetadata = { error: true };
           console.error("[SAIVerse Lite][tool] execution failed", { tool: call.name, error });
         }
-        lastStored = await store(handyToolRecord(call.name, resultContent, resultMetadata));
+        await store(handyToolRecord(call.name, resultContent, resultMetadata));
         conversation.push(redactProviderMessage({ role: "tool", content: resultContent, toolCallId: call.id, toolName: call.name, toolCalls: [] }, passphrase));
       }
     }

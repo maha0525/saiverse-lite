@@ -9,6 +9,7 @@ export class PackArchive {
   private constructor(
     private readonly reader: ZipReader<Blob>,
     private readonly entries: Map<string, FileEntry>,
+    private readonly listing: readonly string[],
     readonly uncompressedBytes: number,
   ) {}
 
@@ -18,18 +19,31 @@ export class PackArchive {
     const reader = new ZipReader(new BlobReader(file), { filenameValidation: "tolerant", checkCrc32: true });
     try {
       const entries = new Map<string, FileEntry>();
+      const listing: string[] = [];
       let total = 0;
       for (const entry of await reader.getEntries()) {
         total += entry.uncompressedSize;
+        if (entry.directory) continue;
         // A repeated name reads as its last entry, as in Python's zipfile.
-        if (!entry.directory) entries.set(entry.filename, entry);
+        entries.set(entry.filename, entry);
+        listing.push(JSON.stringify([entry.filename, entry.crc32, entry.uncompressedSize]));
       }
-      return new PackArchive(reader, entries, total);
+      return new PackArchive(reader, entries, listing.sort(), total);
     } catch (error) {
       await reader.close().catch(() => undefined);
       console.warn("[SAIVerse Lite][pack] ZIP could not be opened", error);
       throw new PackFormatError("ZIP ファイルとして読めません");
     }
+  }
+
+  /**
+   * What tells one pack from another: the name, CRC and size of every entry, from the ZIP's
+   * listing, so no entry is read. Zipping the same files again gives the same value.
+   * `crypto.subtle` needs a Secure Context, and so does the OPFS an import cannot start without.
+   */
+  async fingerprint(): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(this.listing.join("\n")));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
   get names(): string[] {

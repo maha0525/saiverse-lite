@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import logoUrl from "./assets/logo.png";
 import { ChatService, type ChatStatusTone, type MetabolismState } from "./chatService";
-import { presentChatError, type ChatErrorPresentation } from "./chatErrors";
+import { ChatOperationError, presentChatError, type ChatErrorPresentation } from "./chatErrors";
 import { ChatErrorNotice } from "./components/ChatErrorNotice";
 import { ChatView } from "./components/ChatView";
 import { DataView } from "./components/DataView";
@@ -30,6 +30,7 @@ import type { ConversationImportTarget } from "./components/OfficialImportDialog
 import { LEGAL_VERSION } from "./legal";
 import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
+import { withoutPassphrase } from "./memory/conversation";
 import { activateThread } from "./memory/session";
 import { resolveInitialAnchor } from "./memory/window";
 import { readAttachment, type AttachmentItem } from "./pack/attachments";
@@ -382,7 +383,8 @@ export default function App() {
         } catch (refreshError) {
           console.error("[SAIVerse Lite][chat] refresh after failed send also failed", refreshError);
         }
-        return false;
+        // A kept turn is in the history already; the composer getting the text back would send it twice.
+        return error instanceof ChatOperationError && error.keptTurn;
       }
       try {
         await refreshConversation(selectedPersona.id, activeThread.id);
@@ -404,7 +406,7 @@ export default function App() {
         if (!window.confirm("この発言より後の会話はすべて削除されます。元に戻せません。続けますか？")) return;
         await deleteRowsAfter(repository, message);
       }
-      await repository.putMessage({ ...message, content, editedAt: Date.now() });
+      await repository.putMessage(await withoutPassphrase(repository, { ...message, content, editedAt: Date.now() }));
       await loadThread(message.threadId);
     } catch (error) {
       console.error("[SAIVerse Lite][chat] Failed to edit message", { messageId: message.id, error });

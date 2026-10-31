@@ -122,12 +122,16 @@ function rawTextIsStructured(value: unknown): boolean {
   }
 }
 
+/** body: importer.py _json_bytes_to_text, with the encoding `json.loads(bytes)` detects. Throws when it does not decode. */
+function jsonBytesToText(data: Uint8Array): string {
+  const encoding = detectJsonEncoding(data);
+  if (encoding === "utf-32le" || encoding === "utf-32be") return decodeUtf32(data, encoding === "utf-32le");
+  return new TextDecoder(encoding, { fatal: true }).decode(data);
+}
+
 function bytesAreText(value: Record<string, string>): boolean {
   try {
-    const data = base64ToBytes(value[BYTES_MARKER] ?? "");
-    const encoding = detectJsonEncoding(data);
-    if (encoding === "utf-32le" || encoding === "utf-32be") decodeUtf32(data, encoding === "utf-32le");
-    else new TextDecoder(encoding, { fatal: true }).decode(data);
+    jsonBytesToText(base64ToBytes(value[BYTES_MARKER] ?? ""));
     return true;
   } catch {
     return false;
@@ -135,9 +139,23 @@ function bytesAreText(value: Record<string, string>): boolean {
 }
 
 /**
+ * The value of a JSON text column as Lite works with it: the wrappers taken off, and text
+ * parsed the way the body's readers `json.loads` the column. Null when it reads as nothing.
+ */
+export function decodeJsonColumn(value: unknown): unknown {
+  try {
+    const decoded = decodeValue(value);
+    if (decoded instanceof Uint8Array) return parseJson(jsonBytesToText(decoded));
+    return typeof decoded === "string" ? parseJson(decoded) : decoded;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * body: importer.py _refuse_structured_raw_text. The columns of `columns` that keep the row
- * out of the import. Lite stores the wrapped values unchanged, so a bytes wrapper that reads as
- * text stays as it is here instead of being rewritten.
+ * out of the import. A bytes wrapper that reads as text stays in `source` as it came;
+ * `decodeJsonColumn` reads it for the working value.
  */
 export function refusedJsonTextColumns(row: Record<string, unknown>, columns: readonly string[]): string[] {
   return columns.filter((column) => {

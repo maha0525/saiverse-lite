@@ -4,6 +4,8 @@ import { readSse, safeJson } from "./sse";
 import {
   assertOk,
   closeJsonSchema,
+  ProviderHttpError,
+  StructuredOutputRefusedError,
   type CompletionRequest,
   type CompletionResult,
   type ImageGenerationResult,
@@ -127,6 +129,8 @@ function chatMessages(request: Pick<ProviderRequest, "systemPrompt" | "memoryCon
 }
 
 const STRUCTURED_OUTPUT_NAME = "structured_output";
+/** The answers of a server that does not take `response_format`. Auth, rate and server errors stay failures. */
+const STRUCTURED_OUTPUT_REFUSED_STATUSES = new Set([400, 422, 501]);
 
 export class OpenAiProvider implements LlmProvider {
   readonly supportsStructuredOutput = true;
@@ -198,7 +202,14 @@ export class OpenAiProvider implements LlmProvider {
       body: JSON.stringify(body),
       signal: request.signal ?? null,
     }, request.onRetry ? { onRetry: request.onRetry } : undefined);
-    await assertOk(response, this.config.label, request.model);
+    try {
+      await assertOk(response, this.config.label, request.model);
+    } catch (error) {
+      if (request.responseSchema && error instanceof ProviderHttpError && STRUCTURED_OUTPUT_REFUSED_STATUSES.has(error.status)) {
+        throw new StructuredOutputRefusedError(error);
+      }
+      throw error;
+    }
     const payload = await response.json() as {
       choices?: Array<{ message?: { content?: string | null } }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };

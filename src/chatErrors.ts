@@ -8,6 +8,8 @@ export class ChatOperationError extends Error {
     readonly originalError: unknown,
     readonly rollbackSucceeded: boolean,
     readonly rollbackError: unknown = null,
+    /** The turn had already changed the persona's memory, so its rows stayed in the history. */
+    readonly keptTurn = false,
   ) {
     super(originalError instanceof Error ? originalError.message : String(originalError), {
       cause: originalError,
@@ -41,6 +43,11 @@ function rawError(error: unknown): string {
 
 function operationState(error: ChatOperationError | null, operation: ChatOperation): string {
   if (!error) return "";
+  if (error.keptTurn && error.rollbackSucceeded) {
+    return operation === "send"
+      ? "途中で記憶への書き込みが済んでいたので、ここまでのやり取りは履歴に残しています。"
+      : "途中で記憶への書き込みが済んでいたので、元の返答と今回のやり取りのどちらも履歴に残しています。";
+  }
   if (operation === "send") {
     return error.rollbackSucceeded
       ? "送信内容は履歴に残さず、入力欄へ戻しました。"

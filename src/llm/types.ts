@@ -109,6 +109,17 @@ export class ProviderHttpError extends Error {
   }
 }
 
+/**
+ * An OpenAI compatible server turned down `response_format`. Servers word this differently and
+ * many take only part of the schema, so the status decides: not a failure, a thing it cannot do.
+ */
+export class StructuredOutputRefusedError extends Error {
+  constructor(override readonly cause: ProviderHttpError) {
+    super(cause.message);
+    this.name = "StructuredOutputRefusedError";
+  }
+}
+
 export async function assertOk(response: Response, provider: string, model?: string): Promise<void> {
   if (response.ok) return;
   const body = await response.text();

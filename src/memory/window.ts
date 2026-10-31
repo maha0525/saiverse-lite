@@ -1,7 +1,9 @@
 import type { ChatMessage, MessagePosition } from "../domain";
 import { CATEGORY_CHRONICLE } from "../pageRecords";
 import type { LiteRepository } from "../storage/repository";
+import { composeMessages } from "./conversation";
 import { chronicleEntries, coveredMessageIds } from "./entries";
+import { PASSPHRASE_LENGTH } from "./notices";
 
 // body: saiverse/model_configs.py BUILTIN_METABOLISM_*_CHARS and sai_memory/arasuji/alignment.py DEFAULT_TARGET_CHARS.
 export const METABOLISM_HIGH_CHARS = 60_000;
@@ -17,6 +19,9 @@ const CHRONICLE_EXCLUDED_LINE_ROLES = new Set(["sub_line", "meta_judgment", "nes
 // body: sai_memory/arasuji/generator.py.
 const MECHANISM_TEXT_MAX_CHARS = 500;
 const CONDENSE_HEAD_CHARS = 40;
+
+/** Only its length shows in a count: the tag holds it, and redacting keeps the length of a text. */
+const MEASURING_PASSPHRASE = "*".repeat(PASSPHRASE_LENGTH);
 
 export function messageTags(message: ChatMessage): string[] {
   const tags = message.metadata.tags;
@@ -47,20 +52,19 @@ export function isChronicleEligible(message: ChatMessage): boolean {
 }
 
 /**
- * The characters a presented row sends. A row's pairedActionText goes out as
- * its own notice right before it, so it counts with the row.
+ * The quantity the kept amount is compared with. Mechanism rows are sent but are not
+ * conversation, and neither is a row's pairedActionText, which goes out as its own notice.
  */
-export function presentedLength(message: ChatMessage): number {
-  return message.content.length + (message.pairedActionText?.length ?? 0);
-}
-
-/** The quantity the kept amount is compared with. Mechanism rows are sent but are not conversation. */
 export function conversationLength(message: ChatMessage): number {
-  return isMechanismRow(message) ? 0 : presentedLength(message);
+  return isMechanismRow(message) ? 0 : message.content.length;
 }
 
+/**
+ * What `composeMessages` sends for these rows, the quantity the limit is compared with. The
+ * time and auto recall at the end change every turn and are not rows, so they do not count.
+ */
 export function totalChars(rows: ChatMessage[]): number {
-  return rows.reduce((sum, row) => sum + presentedLength(row), 0);
+  return composeMessages(rows, MEASURING_PASSPHRASE, []).reduce((sum, message) => sum + message.content.length, 0);
 }
 
 export function conversationChars(rows: ChatMessage[]): number {
@@ -94,7 +98,7 @@ export function materialChars(messages: ChatMessage[]): number {
   return messages.reduce((sum, message) => sum + materialText(message).length, 0);
 }
 
-async function* walkThread(
+export async function* walkThread(
   repository: LiteRepository,
   threadId: string,
   direction: "forward" | "backward",

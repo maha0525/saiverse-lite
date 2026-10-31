@@ -13,7 +13,7 @@ import {
 import { CATEGORY_CHRONICLE, CATEGORY_CORE, liveCoreMemories, softDeleteCoreMemory } from "../pageRecords";
 import { IndexedDbRepository } from "./indexedDbRepository";
 import { MemoryRepository } from "./memoryRepository";
-import type { LiteRepository } from "./repository";
+import { RowOwnerError, type LiteRepository } from "./repository";
 
 const TRUNK_IDS = ["root_chronicle", "root_core", "root_events", "root_people", "root_plans", "root_terms"];
 
@@ -220,7 +220,7 @@ const contract: Array<[string, (repository: LiteRepository) => Promise<void>]> =
     expect((await repository.listThreads(persona.id)).map((item) => item.id)).toEqual([thread.id]);
   }],
 
-  ["clears session pointers into deleted threads and rows, and nothing else", async (repository) => {
+  ["clears the session's thread with its thread, and leaves a lost anchor to prepareSession", async (repository) => {
     const persona = await initialized(repository);
     const kept = threadOf(persona.id, "kept");
     const gone = threadOf(persona.id, "gone");
@@ -231,18 +231,50 @@ const contract: Array<[string, (repository: LiteRepository) => Promise<void>]> =
 
     await repository.putSession({ ...session, activeThreadId: kept.id, anchorMessageId: goneRow.id, headText: "head" });
     await repository.deleteThreads([gone.id]);
-    expect(await repository.getSession(persona.id)).toMatchObject({ activeThreadId: kept.id, anchorMessageId: null, headText: "head" });
+    expect(await repository.getSession(persona.id)).toMatchObject({ activeThreadId: kept.id, anchorMessageId: goneRow.id, headText: "head" });
     expect(await repository.listMessages(gone.id)).toEqual([]);
     expect(await repository.listMessages(kept.id)).toEqual([keptRow]);
 
     await repository.putSession({ ...session, activeThreadId: kept.id, anchorMessageId: keptRow.id });
     await repository.deleteMessage(keptRow.id);
-    expect(await repository.getSession(persona.id)).toMatchObject({ activeThreadId: kept.id, anchorMessageId: null });
+    expect(await repository.getSession(persona.id)).toMatchObject({ activeThreadId: kept.id, anchorMessageId: keptRow.id });
 
     await repository.putMessage(keptRow);
     await repository.putSession({ ...session, activeThreadId: kept.id, anchorMessageId: keptRow.id });
     await repository.deleteThread(kept.id);
     expect(await repository.getSession(persona.id)).toMatchObject({ activeThreadId: null, anchorMessageId: null });
+  }],
+
+  ["refuses a thread or message another persona owns, and writes nothing of the batch", async (repository) => {
+    const persona = await initialized(repository);
+    const other = { ...createDefaultPersona(1), id: "persona_other" };
+    await repository.putPersona(other);
+    const theirs = threadOf(other.id);
+    const theirRow = messageOf(theirs, 1, 1);
+    await repository.writePersonaRecords(other.id, { threads: [theirs], messages: [theirRow] });
+
+    const mine = threadOf(persona.id);
+    const mineRow = messageOf(mine, 2, 2);
+    const failure = await repository.writePersonaRecords(persona.id, { threads: [mine], messages: [mineRow, { ...theirRow, personaId: persona.id, threadId: mine.id }] }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RowOwnerError);
+    expect((failure as RowOwnerError).ownerPersonaId).toBe(other.id);
+    await expect(repository.writePersonaRecords(persona.id, { threads: [{ ...theirs, personaId: persona.id }] })).rejects.toBeInstanceOf(RowOwnerError);
+    expect(await repository.getThread(mine.id)).toBeUndefined();
+    expect(await repository.getMessage(mineRow.id)).toBeUndefined();
+    expect(await repository.getMessage(theirRow.id)).toEqual(theirRow);
+    expect((await repository.getThread(theirs.id))?.personaId).toBe(other.id);
+  }],
+
+  ["applies a batch's session update with its rows, or neither", async (repository) => {
+    const persona = await initialized(repository);
+    const thread = threadOf(persona.id);
+    await repository.writePersonaRecords(persona.id, { threads: [thread], session: (session) => ({ ...session, extractionBacklog: [{ entryId: "entry", attempts: 0 }] }) });
+    expect(await repository.getThread(thread.id)).toEqual(thread);
+    expect((await repository.getSession(persona.id))?.extractionBacklog).toEqual([{ entryId: "entry", attempts: 0 }]);
+
+    const orphan = threadOf("persona_without_a_session");
+    await expect(repository.writePersonaRecords(orphan.personaId, { threads: [orphan], session: (session) => session })).rejects.toThrow("Session not found");
+    expect(await repository.getThread(orphan.id)).toBeUndefined();
   }],
 
   ["applies session updates one after another", async (repository) => {

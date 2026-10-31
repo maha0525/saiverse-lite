@@ -1,17 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService, type MetabolismState } from "../chatService";
-import { createChatMessage, createDefaultPersona, createDefaultProvider, handyToolRecord, newId, type ChatMessage, type ConversationThread, type Persona } from "../domain";
+import { createChatMessage, createDefaultPersona, createDefaultProvider, handyToolRecord, newId, type ChatMessage, type ConversationThread, type ExtractionBacklogItem, type Persona } from "../domain";
 import { MockProvider } from "../llm/mock";
-import type { CompletionRequest, CompletionResult, ProviderRequest } from "../llm/types";
+import { ProviderHttpError, StructuredOutputRefusedError, type CompletionRequest, type CompletionResult, type ProviderMessage, type ProviderRequest } from "../llm/types";
 import { CATEGORY_CHRONICLE, CATEGORY_CORE, epochSeconds, liveCoreMemories } from "../pageRecords";
 import { MemoryRepository } from "../storage/memoryRepository";
+import { composeMessages, realtimeText } from "./conversation";
 import { retryExtractionBacklog } from "./entities";
 import { chronicleEntries, coveredMessageIds } from "./entries";
 import { planEviction } from "./eviction";
 import { runMetabolism } from "./metabolism";
 import { activateThread, prepareSession } from "./session";
 import { buildSluicePrompt, parseSluiceResult } from "./sluice";
-import { CHRONICLE_UNIT_CHARS, METABOLISM_TARGET_CHARS, readWindow, resolveInitialAnchor } from "./window";
+import {
+  CHRONICLE_UNIT_CHARS,
+  conversationChars,
+  METABOLISM_HIGH_CHARS,
+  METABOLISM_TARGET_CHARS,
+  readWindow,
+  resolveInitialAnchor,
+  totalChars,
+  windowNeedsMetabolism,
+} from "./window";
 
 const BASE_MS = new Date(2026, 5, 1, 9, 0, 0).getTime();
 
@@ -332,6 +342,332 @@ describe("Metabolism end to end with the mock provider", () => {
   });
 });
 
+const SLUICE_NOTHING = JSON.stringify({ reflection: "", core_adds: [], core_updates: [], core_removes: [] });
+
+describe("the sluice and the record of it", () => {
+  beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => undefined); });
+
+  const adding = (request: CompletionRequest): Promise<CompletionResult> | null => (isSluice(request)
+    ? reply(JSON.stringify({ reflection: "残す", core_adds: [{ content: "新しい事実" }, { content: "新しい事実" }], core_updates: [{ memory_ref: "core:1", content: "直した事実" }], core_removes: [] }))
+    : null);
+
+  it("go in one write", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await f.repository.addCoreMemories(f.persona.id, [{ content: "古い事実" }]);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    spyProvider({ complete: adding });
+    const write = vi.spyOn(f.repository, "writePersonaRecords");
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("ok");
+    const batch = write.mock.calls.map(([, written]) => written).find((written) => written.messages?.some((message) => message.metadata.__system_notice__ === "sluice_capture"))!;
+    expect(batch.pages?.map((page) => page.content).sort()).toEqual(["新しい事実", "直した事実"].sort());
+    expect(batch.messages).toHaveLength(1);
+    const live = liveCoreMemories(await f.repository.listPages(f.persona.id, CATEGORY_CORE));
+    expect(new Set(live.map((page) => page.shortId)).size).toBe(live.length);
+  });
+
+  it("are both missing when that write fails, and the anchor stays", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await f.repository.addCoreMemories(f.persona.id, [{ content: "古い事実" }]);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const { anchorMessageId } = (await f.repository.getSession(f.persona.id))!;
+    spyProvider({ complete: adding });
+    const write = f.repository.writePersonaRecords.bind(f.repository);
+    vi.spyOn(f.repository, "writePersonaRecords").mockImplementation(async (id, batch) => {
+      if (batch.messages?.length) throw new Error("端末が止まった");
+      await write(id, batch);
+    });
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("failed");
+    expect(liveCoreMemories(await f.repository.listPages(f.persona.id, CATEGORY_CORE)).map((page) => page.content)).toEqual(["古い事実"]);
+    expect((await f.repository.listMessages(f.thread.id)).some((message) => message.metadata.__system_notice__ === "sluice_capture")).toBe(false);
+    expect((await f.repository.getSession(f.persona.id))?.anchorMessageId).toBe(anchorMessageId);
+  });
+
+  it("are skipped with a notice when the server refuses structured output", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const { anchorMessageId } = (await f.repository.getSession(f.persona.id))!;
+    spyProvider({ complete: (request) => (isSluice(request) ? Promise.reject(new StructuredOutputRefusedError(new ProviderHttpError("互換サーバー", 400, "bad"))) : null) });
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("ok");
+    const session = (await f.repository.getSession(f.persona.id))!;
+    expect(session.metabolismError).toBeNull();
+    expect(session.metabolismNotice).toContain("スルース");
+    expect(session.anchorMessageId).not.toBe(anchorMessageId);
+  });
+});
+
+describe("a primary entry and its extraction", () => {
+  beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => undefined); });
+
+  it("are saved together, and the mark leaves when the extraction succeeds", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const during: Array<Promise<ExtractionBacklogItem[] | undefined>> = [];
+    spyProvider({
+      complete: (request) => {
+        if (isEntity(request)) during.push(f.repository.getSession(f.persona.id).then((session) => session?.extractionBacklog));
+        return null;
+      },
+    });
+    await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(during.length).toBeGreaterThan(0);
+    const entries = chronicleEntries(await f.repository.listPages(f.persona.id, CATEGORY_CHRONICLE));
+    const pending = (await during[0])!;
+    expect(pending).toEqual([{ entryId: expect.any(String) as string, attempts: 0 }]);
+    expect(entries.map((entry) => entry.id)).toContain(pending[0]!.entryId);
+    expect((await f.repository.getSession(f.persona.id))?.extractionBacklog).toEqual([]);
+  });
+
+  it("are both absent when the write fails", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    spyProvider();
+    vi.spyOn(f.repository, "writePersonaRecords").mockRejectedValue(new Error("端末が止まった"));
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("failed");
+    expect(chronicleEntries(await f.repository.listPages(f.persona.id, CATEGORY_CHRONICLE))).toEqual([]);
+    expect((await f.repository.getSession(f.persona.id))?.extractionBacklog ?? []).toEqual([]);
+  });
+
+  it("are picked up by the next run when a stop left the mark", async () => {
+    const f = await fixture();
+    const rows = await seed(f, 2, 10);
+    const chronicle = (await f.repository.listPages(f.persona.id, CATEGORY_CHRONICLE))[0]!;
+    await f.repository.putPage({
+      ...chronicle, id: "entry-stopped", isTrunk: false, parentId: "root_chronicle", shortId: 40,
+      metadata: { level: 1, source_ids: rows.map((message) => message.id), start_time: 1, end_time: 2 },
+    });
+    await f.repository.updateSession(f.persona.id, (session) => ({ ...session, extractionBacklog: [{ entryId: "entry-stopped", attempts: 0 }] }));
+    spyProvider({ complete: (request) => (isEntity(request) ? reply(JSON.stringify({ entities: [{ name: "ミケ", category: "people", summary: "飼い猫", notes: ["三毛猫である"] }] })) : null) });
+    await retryExtractionBacklog(f.repository, f.persona.id, { provider: new MockProvider(createDefaultProvider()), model: "mock" });
+    expect((await f.repository.getSession(f.persona.id))?.extractionBacklog).toEqual([]);
+    expect((await f.repository.listPages(f.persona.id)).some((page) => page.title === "ミケ")).toBe(true);
+  });
+});
+
+describe("the anchor", () => {
+  it("is found again when its row is gone", async () => {
+    const f = await fixture();
+    const rows = await seed(f, 6, 10);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    await f.repository.deleteMessage(rows[0]!.id);
+    const { session, rows: window } = await prepareSession(f.repository, f.persona, f.thread.id);
+    expect(session.anchorMessageId).toBe(rows[1]!.id);
+    expect(window.map((message) => message.id)).toEqual(rows.slice(1).map((message) => message.id));
+  });
+
+  it("is found again when its row is in another thread", async () => {
+    const f = await fixture();
+    const rows = await seed(f, 4, 10);
+    const other: ConversationThread = { ...f.thread, id: newId("thread") };
+    await f.repository.putThread(other);
+    const stray = row(other, 900, "user", "別の話");
+    await f.repository.writePersonaRecords(f.persona.id, { messages: [stray] });
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    await f.repository.updateSession(f.persona.id, (session) => ({ ...session, anchorMessageId: stray.id }));
+    const { session, rows: window } = await prepareSession(f.repository, f.persona, f.thread.id);
+    expect(session.anchorMessageId).toBe(rows[0]!.id);
+    expect(window).toHaveLength(4);
+  });
+
+  it("is found again in the middle of a conversation, and the next response carries the rest of the window", async () => {
+    const f = await fixture();
+    const rows = await seed(f, 4, 10);
+    const calls = spyProvider();
+    const service = new ChatService(f.repository);
+    await service.send(f.persona, f.thread, "一通目");
+    for (const message of rows.slice(0, 2)) await f.repository.deleteMessage(message.id);
+    await service.send(f.persona, f.thread, "二通目");
+    expect(calls.streams.at(-1)!.messages.map((message) => message.content).join("\n")).toContain("一通目");
+  });
+
+  it("moves to the window's next row when the planned row was deleted during the run", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const session = (await f.repository.getSession(f.persona.id))!;
+    const window = await readWindow(f.repository, f.thread.id, session.anchorMessageId!);
+    const plan = planEviction(window, { targetChars: METABOLISM_TARGET_CHARS, unitChars: CHRONICLE_UNIT_CHARS });
+    const evicted = plan.folds.flat().length;
+    spyProvider({
+      complete: async (request) => {
+        if (!isSluice(request)) return reply(isEntity(request) ? JSON.stringify({ entities: [] }) : "あらすじ");
+        await f.repository.deleteMessage(window[evicted]!.id);
+        return reply(SLUICE_NOTHING);
+      },
+    });
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("ok");
+    expect((await f.repository.getSession(f.persona.id))?.anchorMessageId).toBe(window[evicted + 1]!.id);
+  });
+
+  it("is left for the next preparation when every kept row was deleted during the run", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const session = (await f.repository.getSession(f.persona.id))!;
+    const window = await readWindow(f.repository, f.thread.id, session.anchorMessageId!);
+    spyProvider({
+      complete: async (request) => {
+        if (!isSluice(request)) return reply(isEntity(request) ? JSON.stringify({ entities: [] }) : "あらすじ");
+        await f.repository.deleteThread(f.thread.id);
+        return reply(SLUICE_NOTHING);
+      },
+    });
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("ok");
+    expect(window.length).toBeGreaterThan(0);
+    expect((await f.repository.getSession(f.persona.id))).toMatchObject({ activeThreadId: null, anchorMessageId: null });
+  });
+});
+
+describe("prepareSession while the thread changes", () => {
+  async function twoThreads(): Promise<Fixture & { other: ConversationThread; otherRow: ChatMessage }> {
+    const f = await fixture();
+    await seed(f, 4, 10);
+    const other: ConversationThread = { ...f.thread, id: newId("thread"), title: "別の会話" };
+    await f.repository.putThread(other);
+    const otherRow = row(other, 900, "user", "別の話");
+    await f.repository.writePersonaRecords(f.persona.id, { messages: [otherRow] });
+    return { ...f, other, otherRow };
+  }
+
+  const moveOnce = (f: Awaited<ReturnType<typeof twoThreads>>): (() => Promise<void>) => {
+    let moved = false;
+    return async () => {
+      if (moved) return;
+      moved = true;
+      await f.repository.updateSession(f.persona.id, (session) => ({ ...session, activeThreadId: f.other.id, anchorMessageId: f.otherRow.id }));
+    };
+  };
+
+  it("reads again, so the session and the rows are of one thread, while the head is built", async () => {
+    const f = await twoThreads();
+    const move = moveOnce(f);
+    const getSettings = f.repository.getSettings.bind(f.repository);
+    vi.spyOn(f.repository, "getSettings").mockImplementation(async () => {
+      await move();
+      return getSettings();
+    });
+    const { session, rows } = await prepareSession(f.repository, f.persona, f.thread.id);
+    expect(session.activeThreadId).toBe(f.thread.id);
+    expect(session.anchorMessageId).toBe(rows[0]?.id);
+    expect(rows.every((message) => message.threadId === f.thread.id)).toBe(true);
+  });
+
+  it("does the same when nothing had to be rebuilt", async () => {
+    const f = await twoThreads();
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const move = moveOnce(f);
+    const read = f.repository.readThreadMessages.bind(f.repository);
+    vi.spyOn(f.repository, "readThreadMessages").mockImplementation(async (threadId, range) => {
+      await move();
+      return read(threadId, range);
+    });
+    const { session, rows } = await prepareSession(f.repository, f.persona, f.thread.id);
+    expect(session.activeThreadId).toBe(f.thread.id);
+    expect(rows.map((message) => message.threadId)).toEqual(Array(4).fill(f.thread.id));
+  });
+
+  it("gives up with an error when the thread never holds still", async () => {
+    const f = await twoThreads();
+    const getSettings = f.repository.getSettings.bind(f.repository);
+    vi.spyOn(f.repository, "getSettings").mockImplementation(async () => {
+      await f.repository.updateSession(f.persona.id, (session) => ({ ...session, activeThreadId: f.other.id, anchorMessageId: f.otherRow.id }));
+      return getSettings();
+    });
+    await expect(prepareSession(f.repository, f.persona, f.thread.id)).rejects.toThrow("もう一度");
+  });
+
+  it("does not take the thread back for a screen that has moved on", async () => {
+    const f = await twoThreads();
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    const third: ConversationThread = { ...f.thread, id: newId("thread") };
+    await f.repository.putThread(third);
+    const move = moveOnce(f);
+    const listPages = f.repository.listPages.bind(f.repository);
+    vi.spyOn(f.repository, "listPages").mockImplementation(async (personaId, category) => {
+      await move();
+      return listPages(personaId, category);
+    });
+    const opened = await activateThread(f.repository, f.persona, third.id);
+    expect(opened).toMatchObject({ activeThreadId: f.other.id, anchorMessageId: f.otherRow.id });
+  });
+});
+
+describe("what the limit counts", () => {
+  const sent = (messages: ProviderMessage[]): number => messages.reduce((sum, message) => sum + message.content.length, 0);
+
+  async function rowsOf(): Promise<Fixture & { notice: ChatMessage; spoken: ChatMessage }> {
+    const f = await fixture();
+    const spoken = row(f.thread, 1, "assistant", "応答", { pairedActionText: "指示の本文" });
+    const notice = createChatMessage({
+      ...handyToolRecord("memory_read", "結果"),
+      id: "row-tool", threadId: f.thread.id, personaId: f.persona.id, createdAt: BASE_MS + 120_000, seq: 3,
+    });
+    return { ...f, notice, spoken };
+  }
+
+  it("is exactly what composeMessages sends for the rows, with no time or recall", async () => {
+    const { spoken, notice, thread } = await rowsOf();
+    const autonomous = row(thread, 4, "assistant", "自律の発話", { metadata: { aspect: "autonomous", images: [{ uri: "saiverse://image/a.png" }] } });
+    const rows = [row(thread, 0, "user", "質問"), spoken, notice, autonomous];
+    expect(totalChars(rows)).toBe(sent(composeMessages(rows, "a1b2c3d4e5f6", [])));
+  });
+
+  it("counts a paired action as mechanism text: in what is sent, not in the conversation", async () => {
+    const { spoken, notice } = await rowsOf();
+    expect(composeMessages([spoken], "a1b2c3d4e5f6", []).map((message) => message.content).join("\n")).toContain("指示の本文");
+    expect(totalChars([spoken])).toBeGreaterThan(totalChars([{ ...spoken, pairedActionText: null }]));
+    expect(conversationChars([spoken])).toBe(spoken.content.length);
+    expect(conversationChars([notice])).toBe(0);
+  });
+
+  /** One long row that brings the sent total of the window to exactly `total`. */
+  function windowOf(thread: ConversationThread, total: number): ChatMessage[] {
+    const empty = row(thread, 0, "user", "");
+    const tail = row(thread, 1, "assistant", "応答");
+    const missing = total - totalChars([empty, tail]);
+    return [{ ...empty, content: "あ".repeat(missing) }, tail];
+  }
+
+  it("runs past the limit and not at it", async () => {
+    const { thread } = await rowsOf();
+    expect(windowNeedsMetabolism(windowOf(thread, METABOLISM_HIGH_CHARS))).toBe(false);
+    expect(windowNeedsMetabolism(windowOf(thread, METABOLISM_HIGH_CHARS + 1))).toBe(true);
+  });
+
+  it("does not run for the time and recall at the end, which change every turn", async () => {
+    const { thread } = await rowsOf();
+    const rows = windowOf(thread, METABOLISM_HIGH_CHARS);
+    const request = composeMessages(rows, "a1b2c3d4e5f6", [realtimeText(new Date()), "ふと浮かんだ記憶:\n- [Memopedia: ミケ] 飼い猫"]);
+    expect(sent(request)).toBeGreaterThan(METABOLISM_HIGH_CHARS);
+    expect(windowNeedsMetabolism(rows)).toBe(false);
+  });
+
+  it("does not run while the conversation is at the kept amount, however much mechanism text is sent", async () => {
+    const { thread, notice } = await rowsOf();
+    const talk = row(thread, 0, "user", "あ".repeat(METABOLISM_TARGET_CHARS));
+    const tool = { ...notice, content: "結".repeat(METABOLISM_HIGH_CHARS) };
+    expect(totalChars([talk, tool])).toBeGreaterThan(METABOLISM_HIGH_CHARS);
+    expect(windowNeedsMetabolism([talk, tool])).toBe(false);
+    expect(windowNeedsMetabolism([{ ...talk, content: `${talk.content}あ` }, tool])).toBe(true);
+  });
+
+  it("leaves a paired action out of the kept amount, so it cannot hold a run off or start one", async () => {
+    const { thread } = await rowsOf();
+    const talk = row(thread, 0, "user", "あ".repeat(METABOLISM_TARGET_CHARS), { pairedActionText: "指".repeat(METABOLISM_HIGH_CHARS) });
+    expect(windowNeedsMetabolism([talk])).toBe(false);
+  });
+});
+
 describe("the head", () => {
   it("stays byte for byte the same between runs, even when a core memory is written mid-conversation", async () => {
     const f = await fixture();
@@ -465,6 +801,52 @@ describe("the passphrase", () => {
     expect(sent.messages.some((message) => message.content.startsWith(`<system pass="${passphrase}">`))).toBe(true);
     const stored = await f.repository.listMessages(f.thread.id);
     expect(stored.some((message) => `${message.content}${message.pairedActionText ?? ""}`.includes(passphrase!))).toBe(false);
+  });
+
+  it("is taken out of the rows of a turn: the user's input, the tool's text and metadata, the assistant's words", async () => {
+    const f = await fixture();
+    const service = new ChatService(f.repository);
+    await service.send(f.persona, f.thread, "はじめまして");
+    const { passphrase } = (await f.repository.getSession(f.persona.id))!;
+    const replies = [
+      [{ type: "tool-call" as const, call: { id: "call", name: "memory_recall" as const, arguments: { query: passphrase! } } }],
+      [{ type: "text" as const, text: `合言葉は ${passphrase} です` }],
+    ];
+    vi.spyOn(MockProvider.prototype, "stream").mockImplementation(async function* () {
+      await Promise.resolve();
+      yield* replies.shift()!;
+    });
+    await service.send(f.persona, f.thread, `これは ${passphrase} ですか`);
+    const stored = await f.repository.listMessages(f.thread.id);
+    expect(stored.at(-2)?.metadata).toMatchObject({ query: "*".repeat(12) });
+    expect(JSON.stringify(stored)).not.toContain(passphrase);
+  });
+
+  it("is taken out of the sluice's record", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    const { session } = await prepareSession(f.repository, f.persona, f.thread.id);
+    const passphrase = session.passphrase!;
+    spyProvider({
+      complete: (request) => (isSluice(request) ? reply(JSON.stringify({ reflection: `合言葉は ${passphrase}`, core_adds: [], core_updates: [], core_removes: [{ memory_ref: passphrase }] })) : null),
+    });
+    await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    const record = (await f.repository.listMessages(f.thread.id)).find((message) => message.metadata.__system_notice__ === "sluice_capture")!;
+    expect(record.content).toContain("*".repeat(12));
+    expect(JSON.stringify(record)).not.toContain(passphrase);
+  });
+
+  it("is taken out of saved rows when they are sent, whatever the row's kind", async () => {
+    const f = await fixture();
+    const passphrase = "a1b2c3d4e5f6";
+    const rows = [
+      row(f.thread, 0, "user", `利用者 ${passphrase}`),
+      row(f.thread, 1, "assistant", `発話 ${passphrase}`, { pairedActionText: `指示 ${passphrase}`, metadata: { images: [{ uri: `saiverse://image/${passphrase}.png` }] } }),
+      row(f.thread, 2, "assistant", `自律 ${passphrase}`, { metadata: { aspect: "autonomous" } }),
+      createChatMessage({ ...handyToolRecord("memory_read", `結果 ${passphrase}`), id: "row-tool", threadId: f.thread.id, personaId: f.persona.id, createdAt: BASE_MS + 180_000, seq: 4 }),
+    ];
+    const sent = composeMessages(rows, passphrase, [`想起 ${passphrase}`]);
+    expect(sent.map((message) => message.content.split(`pass="${passphrase}"`).join("")).join("\n")).not.toContain(passphrase);
   });
 
   it("is redacted out of what the model repeats", async () => {

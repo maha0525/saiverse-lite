@@ -113,10 +113,19 @@ export function coreBudgetNote(pages: PageRecord[]): string {
   return `現在 ${total.toLocaleString("en-US")} 字 / 目安 ${CORE_MEMORY_CHAR_BUDGET.toLocaleString("en-US")} 字。${over}`;
 }
 
-async function writeCoreNew(repository: LiteRepository, personaId: string, text: string): Promise<string> {
+export interface WriteResult {
+  text: string;
+  /** False when `text` only says why nothing was written. */
+  written: boolean;
+}
+
+const wrote = (text: string): WriteResult => ({ text, written: true });
+const refused = (text: string): WriteResult => ({ text, written: false });
+
+async function writeCoreNew(repository: LiteRepository, personaId: string, text: string): Promise<WriteResult> {
   const [page] = await repository.addCoreMemories(personaId, [{ content: text }]);
   const note = coreBudgetNote(await repository.listPages(personaId, CATEGORY_CORE));
-  return `コア記憶 core:${coreMemoryId(page!)} に書きました（常時開の特殊ページです）。${note}head への反映は次の記憶整理（Metabolism）からです。`;
+  return wrote(`コア記憶 core:${coreMemoryId(page!)} に書きました（常時開の特殊ページです）。${note}head への反映は次の記憶整理（Metabolism）からです。`);
 }
 
 /** A scene is a copy of a real conversation, so it is never rewritten. */
@@ -128,33 +137,33 @@ export async function replaceCoreMemory(repository: LiteRepository, personaId: s
   return "replaced";
 }
 
-async function writeCoreUpdate(repository: LiteRepository, personaId: string, key: string, text: string): Promise<string> {
+async function writeCoreUpdate(repository: LiteRepository, personaId: string, key: string, text: string): Promise<WriteResult> {
   const id = positiveInt(key);
-  if (id === null) return `コア記憶の参照が不正です: core:${key}`;
+  if (id === null) return refused(`コア記憶の参照が不正です: core:${key}`);
   const result = await replaceCoreMemory(repository, personaId, id, text);
-  if (result === "scene") return `コア記憶 core:${id} は場面の記憶 (実会話の写し) なので書き換えの対象外です。`;
-  if (result === "missing") return `コア記憶が見つかりません: core:${id}`;
+  if (result === "scene") return refused(`コア記憶 core:${id} は場面の記憶 (実会話の写し) なので書き換えの対象外です。`);
+  if (result === "missing") return refused(`コア記憶が見つかりません: core:${id}`);
   const note = coreBudgetNote(await repository.listPages(personaId, CATEGORY_CORE));
-  return `コア記憶 core:${id} を上書きしました。${note}head への反映は次の記憶整理（Metabolism）からです。`;
+  return wrote(`コア記憶 core:${id} を上書きしました。${note}head への反映は次の記憶整理（Metabolism）からです。`);
 }
 
-async function appendToPage(repository: LiteRepository, personaId: string, key: string, text: string): Promise<string> {
+async function appendToPage(repository: LiteRepository, personaId: string, key: string, text: string): Promise<WriteResult> {
   const page = findMemopediaPage(await repository.listPages(personaId), key);
-  if (!page) return `ページが見つかりません: memopedia:${key}`;
+  if (!page) return refused(`ページが見つかりません: memopedia:${key}`);
   const content = page.content ? `${page.content}\n\n${text}` : text;
   await repository.putPage({ ...page, content, updatedAt: epochSeconds(Date.now()) });
-  return `${memopediaRef(page)}「${page.title}」に追記しました。`;
+  return wrote(`${memopediaRef(page)}「${page.title}」に追記しました。`);
 }
 
-async function createPage(repository: LiteRepository, personaId: string, title: string, category: string | undefined, text: string): Promise<string> {
+async function createPage(repository: LiteRepository, personaId: string, title: string, category: string | undefined, text: string): Promise<WriteResult> {
   const cat = (category || DEFAULT_MEMOPEDIA_CATEGORY).toLowerCase().trim();
   if (!isMemopediaCategory(cat)) {
-    return `Error: category が不正です: ${JSON.stringify(category)}（有効: ${[...MEMOPEDIA_CATEGORIES].sort().join(", ")}）`;
+    return refused(`Error: category が不正です: ${JSON.stringify(category)}（有効: ${[...MEMOPEDIA_CATEGORIES].sort().join(", ")}）`);
   }
   const existing = findPageByTitle(await repository.listPages(personaId), title);
   if (existing) {
     const ref = memopediaRef(existing);
-    return `同名のページが既にあります: ${ref}「${existing.title}」。追記するには memory_write の ref に ${ref} を指定してください。`;
+    return refused(`同名のページが既にあります: ${ref}「${existing.title}」。追記するには memory_write の ref に ${ref} を指定してください。`);
   }
   const page = memopediaPage(personaId, {
     parentId: `root_${cat}`,
@@ -165,7 +174,7 @@ async function createPage(repository: LiteRepository, personaId: string, title: 
     shortId: await repository.nextPageShortId(personaId),
   });
   await repository.putPage(page);
-  return `新しいページを作りました: ${memopediaRef(page)}「${title}」（カテゴリ: ${cat}）`;
+  return wrote(`新しいページを作りました: ${memopediaRef(page)}「${title}」（カテゴリ: ${cat}）`);
 }
 
 export interface WriteRequest {
@@ -176,18 +185,18 @@ export interface WriteRequest {
 }
 
 /** body: memory_atlas.py `write_page`. */
-export async function writePage(repository: LiteRepository, personaId: string, request: WriteRequest): Promise<string> {
+export async function writePage(repository: LiteRepository, personaId: string, request: WriteRequest): Promise<WriteResult> {
   const text = request.content.trim();
-  if (!text) return "Error: content は空にできません。";
+  if (!text) return refused("Error: content は空にできません。");
   const ref = request.ref?.trim() ?? "";
   const title = request.title?.trim() ?? "";
-  if (Boolean(ref) === Boolean(title)) return "Error: ref（既存ページに書く）と title（新規ページを作る）のどちらか一方だけを指定してください。";
+  if (Boolean(ref) === Boolean(title)) return refused("Error: ref（既存ページに書く）と title（新規ページを作る）のどちらか一方だけを指定してください。");
   if (title) return createPage(repository, personaId, title, request.category, text);
   const parsed = parseAtlasRef(ref);
   if (parsed.kind === "core_all") return writeCoreNew(repository, personaId, text);
   if (parsed.kind === "core") return writeCoreUpdate(repository, personaId, parsed.key, text);
   if (parsed.kind === "memopedia") return appendToPage(repository, personaId, parsed.key, text);
-  return `chronicle:${parsed.key} には書けません。時間の地図（Chronicle）の編纂はシステムが行います。`;
+  return refused(`chronicle:${parsed.key} には書けません。時間の地図（Chronicle）の編纂はシステムが行います。`);
 }
 
 export function searchTerms(value: string): string[] {
@@ -266,7 +275,7 @@ async function messageHits(repository: LiteRepository, personaId: string, terms:
       if (row.role !== "user" && row.role !== "assistant") continue;
       hits.push({
         score: scoreOf(row.content, terms),
-        line: `- [過去の会話 ${formatTimestamp(epochSeconds(row.createdAt))}] ${row.role}: ${clip(row.content)}`,
+        line: `- [過去の会話 ${formatTimestamp(epochSeconds(row.createdAt))}] ${row.role}: ${row.content.trim()}`,
       });
     }
     scanned += batch.length;

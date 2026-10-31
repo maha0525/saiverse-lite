@@ -396,7 +396,11 @@ export async function compileFold(
       messageCount: chunk.length,
       extraMetadata: { digest_origin: "batch", coverage_chars: materialChars(chunk), episode_refs: [] },
     });
-    await repository.putPage(page);
+    // Stored as waiting for extraction from the start, so a stop before `onEntry` finishes loses nothing.
+    await repository.writePersonaRecords(personaId, {
+      pages: [page],
+      session: (session) => ({ ...session, extractionBacklog: [...(session.extractionBacklog ?? []), { entryId: page.id, attempts: 0 }] }),
+    });
     await onEntry({ entryId: page.id, messages: chunk });
   }
 }

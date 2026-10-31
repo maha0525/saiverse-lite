@@ -1,5 +1,5 @@
 import type { ChatMessage, ConversationThread, FragmentRecord, MessageRole, PageRecord } from "../domain";
-import { decodeText, isObject, packTimeToMilliseconds, packTimeToSeconds } from "./format";
+import { decodeJsonColumn, decodeText, isObject, packTimeToMilliseconds, packTimeToSeconds } from "./format";
 
 type PackRow = Record<string, unknown>;
 
@@ -11,9 +11,10 @@ function integer(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 }
 
-/** The stored JSON stays wrapped as it came. An array has no place in a Record; `source` keeps it. */
+/** `source` keeps the column as it came. A scalar or an array has no place in a Record, so it stays only there. */
 function metadataRecord(value: unknown): Record<string, unknown> {
-  return isObject(value) ? value : {};
+  const decoded = decodeJsonColumn(value);
+  return isObject(decoded) ? decoded : {};
 }
 
 /** body: adapter.py _payload_from_message_locked reads role "model" as assistant. */
@@ -43,7 +44,8 @@ export function messageFromRow(row: PackRow, personaId: string, ordinal: number)
 }
 
 function keywords(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  const decoded = decodeJsonColumn(value);
+  return Array.isArray(decoded) ? decoded.filter((item): item is string => typeof item === "string") : [];
 }
 
 export function pageFromRow(row: PackRow, personaId: string): PageRecord {

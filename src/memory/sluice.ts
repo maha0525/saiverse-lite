@@ -1,9 +1,9 @@
-import { createChatMessage, newId, SYSTEM_NOTICE_KEY, type ChatMessage, type PageRecord, type Persona, type PersonaSession } from "../domain";
-import type { JsonSchema, LlmProvider } from "../llm/types";
+import { newId, SYSTEM_NOTICE_KEY, type ChatMessage, type PageRecord, type Persona, type PersonaSession } from "../domain";
+import { StructuredOutputRefusedError, type CompletionResult, type JsonSchema, type LlmProvider } from "../llm/types";
 import type { RetryNotice } from "../llm/retry";
-import { CATEGORY_CORE, epochSeconds, softDeleteCoreMemory } from "../pageRecords";
+import { buildCoreMemoryPages, CATEGORY_CORE, epochSeconds, softDeleteCoreMemory } from "../pageRecords";
 import type { LiteRepository } from "../storage/repository";
-import { composeMessages } from "./conversation";
+import { composeMessages, newConversationRow } from "./conversation";
 import { coreMemoriesInOrder, coreMemoryId } from "./head";
 import { noticeMessage, presentHead } from "./notices";
 
@@ -154,16 +154,26 @@ function parseCoreRef(raw: string): number | null {
 interface AppliedOps {
   applied: number;
   lines: string[];
+  /** The core pages to write. Nothing is stored yet: they go in one write with the record. */
+  pages: PageRecord[];
 }
 
 /**
  * body: `_apply_core_ops`. Updates and removes compare against the text the model
  * was shown, so a stale decision never overwrites an edit made during the call.
  */
-async function applyCoreOps(repository: LiteRepository, personaId: string, result: SluiceResult, shown: Map<number, string>): Promise<AppliedOps> {
+async function planCoreOps(repository: LiteRepository, personaId: string, result: SluiceResult, shown: Map<number, string>): Promise<AppliedOps> {
   const lines: string[] = [];
   let applied = 0;
-  const live = async (): Promise<PageRecord[]> => coreMemoriesInOrder(await repository.listPages(personaId, CATEGORY_CORE));
+  let corePages = await repository.listPages(personaId, CATEGORY_CORE);
+  let nextShortId = await repository.nextPageShortId(personaId);
+  const pages = new Map<string, PageRecord>();
+  const nowSeconds = epochSeconds(Date.now());
+  const live = (): PageRecord[] => coreMemoriesInOrder(corePages);
+  const change = (page: PageRecord): void => {
+    pages.set(page.id, page);
+    corePages = [...corePages.filter((candidate) => candidate.id !== page.id), page];
+  };
 
   for (const op of result.fields.core_adds) {
     const content = op.content!.trim();
@@ -171,18 +181,20 @@ async function applyCoreOps(repository: LiteRepository, personaId: string, resul
       lines.push("add 失敗: 本文が空でした。");
       continue;
     }
-    const duplicate = (await live()).find((page) => page.content.trim() === content);
+    const duplicate = live().find((page) => page.content.trim() === content);
     if (duplicate) {
       applied += 1;
       lines.push(`コア記憶 core:${coreMemoryId(duplicate)} と同一内容のため再採取をスキップしました。`);
       continue;
     }
-    const [page] = await repository.addCoreMemories(personaId, [{ content, confirmed: 0, metadata: { source: "sluice" } }]);
+    const [page] = buildCoreMemoryPages(personaId, corePages, nextShortId, [{ content, confirmed: 0, metadata: { source: "sluice" } }], nowSeconds);
+    nextShortId += 1;
+    change(page!);
     applied += 1;
     lines.push(`コア記憶 core:${coreMemoryId(page!)} に採取: ${content}`);
   }
 
-  const target = async (ref: string, verb: string): Promise<{ id: number; page: PageRecord } | null> => {
+  const target = (ref: string, verb: string): { id: number; page: PageRecord } | null => {
     const id = parseCoreRef(ref);
     if (id === null) {
       lines.push(`${verb} 失敗: memory_ref が core:N の形ではありません (${JSON.stringify(ref)})。`);
@@ -193,7 +205,7 @@ async function applyCoreOps(repository: LiteRepository, personaId: string, resul
       lines.push(`${verb} 失敗: core:${id} のスナップショット情報が無いため適用しませんでした。`);
       return null;
     }
-    const page = (await live()).find((candidate) => coreMemoryId(candidate) === id);
+    const page = live().find((candidate) => coreMemoryId(candidate) === id);
     if (!page || page.content !== before) {
       lines.push(`記憶 core:${id} は実行中に変更されたため適用しませんでした。`);
       return null;
@@ -207,34 +219,29 @@ async function applyCoreOps(repository: LiteRepository, personaId: string, resul
       lines.push(`update 失敗: ${op.memory_ref} の新しい本文が空でした。`);
       continue;
     }
-    const found = await target(op.memory_ref!, "update");
+    const found = target(op.memory_ref!, "update");
     if (!found) continue;
     if (isScene(found.page)) {
       lines.push(`update 失敗: core:${found.id} は場面の記憶 (実会話の写し) なので書き換えの対象外です。`);
       continue;
     }
-    await repository.putPage({
-      ...found.page,
-      content,
-      updatedAt: epochSeconds(Date.now()),
-      metadata: { ...found.page.metadata, confirmed: 0 },
-    });
+    change({ ...found.page, content, updatedAt: nowSeconds, metadata: { ...found.page.metadata, confirmed: 0 } });
     applied += 1;
     lines.push(`コア記憶 core:${found.id} を更新: ${content}`);
   }
 
   for (const op of result.fields.core_removes) {
-    const found = await target(op.memory_ref!, "remove");
+    const found = target(op.memory_ref!, "remove");
     if (!found) continue;
-    await repository.putPage(softDeleteCoreMemory(found.page, epochSeconds(Date.now())));
+    change(softDeleteCoreMemory(found.page, nowSeconds));
     applied += 1;
     lines.push(`コア記憶 core:${found.id} を削除しました。`);
   }
-  return { applied, lines };
+  return { applied, lines, pages: [...pages.values()] };
 }
 
 /** body: `_persist_record`. A system row, never in the persona's voice; `discardable` keeps a no-op run out of the window. */
-async function persistRecord(
+function recordRow(
   repository: LiteRepository,
   persona: Persona,
   threadId: string,
@@ -242,20 +249,17 @@ async function persistRecord(
   prompt: string,
   applied: number,
 ): Promise<ChatMessage> {
-  const record = createChatMessage({
+  return newConversationRow(repository, {
     id: newId("message"),
     threadId,
     personaId: persona.id,
     role: "system",
     content: text,
     createdAt: Date.now(),
-    seq: await repository.nextMessageSeq(persona.id),
     scope: applied > 0 ? "committed" : "discardable",
     pairedActionText: prompt,
     metadata: { tags: ["internal", "event_message", "sluice"], [SYSTEM_NOTICE_KEY]: "sluice_capture" },
   });
-  await repository.putMessage(record);
-  return record;
 }
 
 export interface SluiceLlm {
@@ -268,7 +272,9 @@ export interface SluiceLlm {
 /**
  * Sends the whole window with the head, the way a response is sent, so the persona
  * decides what to keep with its own memory in view. Throws on an unusable reply:
- * the anchor must not move past rows the persona did not get to look at.
+ * the anchor must not move past rows the persona did not get to look at. The core
+ * memory changes and the record land in one transaction. False when the server
+ * refused structured output, which it cannot be asked for here: the run skips this.
  */
 export async function runSluice(
   repository: LiteRepository,
@@ -277,27 +283,36 @@ export async function runSluice(
   threadId: string,
   rows: ChatMessage[],
   llm: SluiceLlm,
-): Promise<void> {
+): Promise<boolean> {
   const passphrase = session.passphrase ?? "";
   const corePages = await repository.listPages(persona.id, CATEGORY_CORE);
   const shown = new Map(coreMemoriesInOrder(corePages).map((page) => [coreMemoryId(page), page.content]));
   const prompt = buildSluicePrompt(corePages);
-  const completion = await llm.provider.complete({
-    model: llm.model,
-    systemPrompt: presentHead(session.headText ?? "", passphrase),
-    memoryContext: session.chronicleText ?? "",
-    messages: [...composeMessages(rows, passphrase, []), noticeMessage(prompt, passphrase)],
-    responseSchema: SLUICE_RESPONSE_SCHEMA,
-    maxOutputTokens: MAX_OUTPUT_TOKENS,
-    ...(llm.signal ? { signal: llm.signal } : {}),
-    ...(llm.onRetry ? { onRetry: llm.onRetry } : {}),
-  });
+  let completion: CompletionResult;
+  try {
+    completion = await llm.provider.complete({
+      model: llm.model,
+      systemPrompt: presentHead(session.headText ?? "", passphrase),
+      memoryContext: session.chronicleText ?? "",
+      messages: [...composeMessages(rows, passphrase, []), noticeMessage(prompt, passphrase)],
+      responseSchema: SLUICE_RESPONSE_SCHEMA,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      ...(llm.signal ? { signal: llm.signal } : {}),
+      ...(llm.onRetry ? { onRetry: llm.onRetry } : {}),
+    });
+  } catch (error) {
+    if (!(error instanceof StructuredOutputRefusedError)) throw error;
+    console.warn("[SAIVerse Lite][sluice] structured output refused; skipping the sluice", { personaId: persona.id, status: error.cause.status });
+    return false;
+  }
   const result = parseSluiceResult(completion.text);
-  const { applied, lines } = await applyCoreOps(repository, persona.id, result, shown);
+  const { applied, lines, pages } = await planCoreOps(repository, persona.id, result, shown);
   const resultLines = [...result.rejections, ...lines];
   const body = ["記憶整理の節目 — スルースの採取判断:"];
   if (result.reflection.trim()) body.push(`${persona.name || persona.id}の判断: ${result.reflection.trim()}`);
   body.push(...resultLines);
   if (applied === 0 && resultLines.length === 0) body.push("今回は採取しませんでした。");
-  await persistRecord(repository, persona, threadId, body.join("\n"), prompt, applied);
+  const record = await recordRow(repository, persona, threadId, body.join("\n"), prompt, applied);
+  await repository.writePersonaRecords(persona.id, { pages, messages: [record] });
+  return true;
 }

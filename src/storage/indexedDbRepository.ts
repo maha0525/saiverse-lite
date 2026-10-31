@@ -23,7 +23,7 @@ import {
   type CoreMemoryDraft,
 } from "../pageRecords";
 import { createV1Stores, upgradeToV2 } from "./migrations";
-import { assertBatchOwner, type LiteRepository, type MessageRange, type PersonaRecordBatch } from "./repository";
+import { assertBatchOwner, RowOwnerError, type LiteRepository, type MessageRange, type PersonaRecordBatch } from "./repository";
 
 type OwnedKey = [personaId: string, id: string];
 
@@ -196,7 +196,7 @@ export class IndexedDbRepository implements LiteRepository {
     const sessions = tx.objectStore("sessions");
     const targetIds = new Set<string>();
     const personaIds = new Set<string>();
-    const deletedMessageIds = new Set<string>();
+    let deletedMessages = 0;
     for (const id of requestedIds) {
       const thread = await threads.get(id);
       if (!thread) continue;
@@ -205,24 +205,18 @@ export class IndexedDbRepository implements LiteRepository {
       await threads.delete(id);
       for (const key of await messages.index("by-thread-order").getAllKeys(ownerKeys(id))) {
         await messages.delete(key);
-        deletedMessageIds.add(key);
+        deletedMessages += 1;
       }
     }
     for (const personaId of personaIds) {
       const session = await sessions.get(personaId);
-      if (!session) continue;
-      const threadGone = session.activeThreadId !== null && targetIds.has(session.activeThreadId);
-      const anchorGone = session.anchorMessageId !== null && deletedMessageIds.has(session.anchorMessageId);
-      if (!threadGone && !anchorGone) continue;
-      await sessions.put({
-        ...session,
-        activeThreadId: threadGone ? null : session.activeThreadId,
-        anchorMessageId: threadGone || anchorGone ? null : session.anchorMessageId,
-      });
+      if (session?.activeThreadId && targetIds.has(session.activeThreadId)) {
+        await sessions.put({ ...session, activeThreadId: null, anchorMessageId: null });
+      }
     }
     await tx.done;
     if (targetIds.size > 0) {
-      console.info("[SAIVerse Lite][storage] Threads deleted", { deletedThreads: targetIds.size, deletedMessages: deletedMessageIds.size });
+      console.info("[SAIVerse Lite][storage] Threads deleted", { deletedThreads: targetIds.size, deletedMessages });
     }
   }
 
@@ -257,14 +251,8 @@ export class IndexedDbRepository implements LiteRepository {
   }
   async putMessage(value: ChatMessage): Promise<void> { await (await this.database()).put("messages", value); }
   async deleteMessage(id: string): Promise<void> {
-    const db = await this.database();
-    const tx = db.transaction(["messages", "sessions"], "readwrite");
-    const message = await tx.objectStore("messages").get(id);
-    await tx.objectStore("messages").delete(id);
-    const session = message ? await tx.objectStore("sessions").get(message.personaId) : undefined;
-    if (session?.anchorMessageId === id) await tx.objectStore("sessions").put({ ...session, anchorMessageId: null });
-    await tx.done;
-    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id, deleted: Boolean(message) });
+    await (await this.database()).delete("messages", id);
+    console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id });
   }
   async nextMessageSeq(personaId: string): Promise<number> {
     const db = await this.database();
@@ -328,11 +316,32 @@ export class IndexedDbRepository implements LiteRepository {
 
   async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
     assertBatchOwner(personaId, batch);
-    const tx = (await this.database()).transaction(["threads", "messages", "pages", "fragments"], "readwrite");
-    for (const thread of batch.threads ?? []) await tx.objectStore("threads").put(thread);
-    for (const message of batch.messages ?? []) await tx.objectStore("messages").put(message);
-    for (const page of batch.pages ?? []) await tx.objectStore("pages").put(page);
-    for (const fragment of batch.fragments ?? []) await tx.objectStore("fragments").put(fragment);
+    const tx = (await this.database()).transaction(["threads", "messages", "pages", "fragments", "sessions"], "readwrite");
+    const assertOwned = (row: { personaId: string } | undefined): void => {
+      if (row && row.personaId !== personaId) throw new RowOwnerError(row.personaId);
+    };
+    try {
+      for (const thread of batch.threads ?? []) {
+        assertOwned(await tx.objectStore("threads").get(thread.id));
+        await tx.objectStore("threads").put(thread);
+      }
+      for (const message of batch.messages ?? []) {
+        assertOwned(await tx.objectStore("messages").get(message.id));
+        await tx.objectStore("messages").put(message);
+      }
+      for (const page of batch.pages ?? []) await tx.objectStore("pages").put(page);
+      for (const fragment of batch.fragments ?? []) await tx.objectStore("fragments").put(fragment);
+      if (batch.session) {
+        const current = await tx.objectStore("sessions").get(personaId);
+        if (!current) throw new Error(`Session not found: ${personaId}`);
+        await tx.objectStore("sessions").put(batch.session(current));
+      }
+    } catch (error) {
+      tx.done.catch(() => undefined);
+      // A failed request has usually aborted the transaction already, and abort() then throws.
+      try { tx.abort(); } catch { /* already aborted */ }
+      throw error;
+    }
     await tx.done;
   }
 

@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import { ChatOperationError, presentChatError } from "./chatErrors";
 import { ProviderHttpError } from "./llm/types";
 
+describe("a turn that stayed in the history", () => {
+  it("says so, instead of saying it was taken back", () => {
+    const failure = new Error("通信が切れました");
+    const sent = presentChatError(new ChatOperationError("send", failure, true, null, true), "send");
+    expect(sent.message).toContain("履歴に残しています");
+    expect(sent.message).not.toContain("入力欄へ戻しました");
+    const regenerated = presentChatError(new ChatOperationError("regenerate", failure, true, null, true), "regenerate");
+    expect(regenerated.message).toContain("どちらも履歴に残しています");
+  });
+});
+
 describe("chat error presentation", () => {
   it("explains a Gemini 503 as provider-side congestion and preserves raw details", () => {
     const body = JSON.stringify({

@@ -59,6 +59,7 @@ export interface ChatMessage {
   /** Shared by every row of one response to a user input. */
   pulseId: string | null;
   pairedActionText: string | null;
+  /** The working value: never wrapped, whatever form the pack row had it in. */
   metadata: Record<string, unknown>;
   /** The pack row as received. Lite never rewrites it. */
   source: Record<string, unknown> | null;
@@ -140,6 +141,8 @@ export interface PersonaSession {
   recallLedger?: Record<string, RecallLedgerItem[]>;
   /** Absent until the first extraction failure. */
   extractionBacklog?: ExtractionBacklogItem[];
+  /** `PackArchive.fingerprint` of the ZIP this import started from. Compared while `importState` is importing. */
+  importFingerprint?: string;
   /** The system prompt `headText` was built from. A different value means the user edited it. */
   headSystemPrompt?: string;
   /** What the last Metabolism left undone without failing, for the screen. */
@@ -231,7 +234,7 @@ export function newId(prefix: string): string {
   return `${prefix}_${randomId()}`;
 }
 
-type NewChatMessage = Pick<ChatMessage, "id" | "threadId" | "personaId" | "role" | "content" | "createdAt" | "seq">
+export type NewChatMessage = Pick<ChatMessage, "id" | "threadId" | "personaId" | "role" | "content" | "createdAt" | "seq">
   & Partial<ChatMessage>;
 
 export function createChatMessage(fields: NewChatMessage): ChatMessage {

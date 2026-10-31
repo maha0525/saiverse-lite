@@ -89,6 +89,7 @@ interface PersonaSession {
   headUpdatedAt: number | null;
   metabolismError: string | null;  // 画面に出す
   importState: "ready" | "importing";
+  importFingerprint?: string;      // 取り込み開始時の ZIP の指紋。importing の間だけ比べる
 }
 ```
 
@@ -114,10 +115,13 @@ interface PersonaSession {
   - `chatlog/threads.json`、`chatlog/messages.json`、`chatlog/stelis_threads.json`
   - `knowledge/pages.json`
   - `extensions/saiverse/memory_db/memopedia_fragments.json`
-- `metadata` の `{"__bytes_b64__": ...}` / `{"__raw_text__": ...}` / `{"__escaped__": ...}` は、ペルソナに見せる値を読むときだけ解く。保存する値は解かない。
+- `source` はパックの行のまま残す。`metadata` は `{"__bytes_b64__": ...}` / `{"__raw_text__": ...}` / `{"__escaped__": ...}` と JSON 文字列を解いた作業用の値で、Chronicle、タグ、添付の読み手はこれを読む。ページの `metadata` と `keywords` も同じ。
 - 書き込みは数百行ごとのトランザクションに分け、進捗を画面へ返す。
 - 途中で止まっても、同じ ZIP をもう一度選べば ID で重複を避けて続きから入る。全部入るまで `importState` は `importing` のままで、そのペルソナとは話せない。
+- 「同じ ZIP」は、全エントリの (名前, CRC, サイズ) から作った指紋で判定する。取り込み開始時に `importFingerprint` へ保存し、ファイル全体はハッシュしない。同じファイルを ZIP し直したものは同じ ZIP として扱う。
 - 同じ `persona_id` のペルソナが完了状態で既にいるときは、何も書かずに止めて理由を画面に出す。
+- `threads.json`、`stelis_threads.json`、`messages.json` の ID が別のペルソナの行と重なるパックは、何も書かずに止める。同じ検査を `writePersonaRecords` が書き込みと同じトランザクションでも行う。
+- 取り込みはオリジンで一度に一つ。`navigator.locks` を使い、無ければメモリの中の印で止める。
 - 取り込み後、`activeThreadId` と `anchorMessageId` を決める。下の「送る会話」の規則を使う。
 - モデル設定は引き継がない。取り込み時に Lite のプロバイダを選ぶ。
 - API キーは扱わない。パックにも無い。
@@ -140,6 +144,8 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 `<system pass="合言葉">本文</system>` の role=user にし、本文の `<system` を無害化し、本文の合言葉を伏せる。
 全プロバイダで同じ経路を使う。記録には書かない。head の説明文は `sea/head_pipeline/sections/system_notice.py` の `SYSTEM_NOTICE_TEXT`。
 
+会話の行は `newConversationRow` で作り、現行の合言葉を本文、`pairedActionText`、`metadata` から伏せて保存する。ユーザー入力、assistant、handy_tool、スルースの記録はこの一つの経路を通る。発言の編集は `withoutPassphrase` を通す。保存済みの行は `composeMessages` が送るときにも伏せる。
+
 ### 送る会話
 
 規則は本体と同じ。参照先は `saiverse_memory/adapter.py` の 3576 行付近。
@@ -154,8 +160,11 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 - 上限を超えていたら、最初の応答の前に Metabolism を走らせる。
 - 画面で開いたスレッドが `activeThreadId` になる（`src/memory/session.ts` の `activateThread`）。別のスレッドへ移ると `anchorMessageId` を消して上の規則で決め直し、head と Chronicle も作り直す。`importing` のペルソナでは何もしない。
 - Metabolism の実行中にスレッドが変わったときは、書いたあらすじは残し、開始位置と head は書かない。開始位置はスレッドごとの値なので、別のスレッドへ持ち越さない。
+- `anchorMessageId` の行が無いとき、または `activeThreadId` の行でないときは、`prepareSession` が上の規則で決め直す。発言削除、ロールバック、スレッド削除、Metabolism と削除の競合はここで回復する。保存の層は開始位置を消さない。
+- `prepareSession` は同じスレッドの session と rows の組を返す。準備中にスレッドか開始位置が変わったら読み直す。`activateThread` は読み直さない。画面が先へ進んだ後で元のスレッドへ戻さないため。
+- Metabolism の確定では新しい開始位置の行の存在を確かめ、無ければ窓の中で次にある行を使う。窓に行が残っていなければ開始位置は書かず、次の `prepareSession` に任せる。
 
-送る本文の字数と会話の行の字数は別の値として数える。上限と比べるのは送る本文の合計、残す量と比べるのは会話の行だけ（`docs/concepts/metabolism.md`）。
+送る本文の字数と会話の行の字数は別の値として数える。上限と比べるのは `composeMessages` が行から作る本文の合計、残す量と比べるのは会話の行だけ（`docs/concepts/metabolism.md`）。`pairedActionText` は送るので合計に入り、会話の行には入らない。末尾の時刻と想起は毎ターン変わる一時の本文なので、どちらにも入れない。
 
 ### ツール
 
@@ -163,7 +172,10 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 - 一回の応答の途中はネイティブツールコールを使う。`lite_provider_state` と thought signature はメモリの中だけで持つ。
 - 保存は本体と同じ形にする（`sea/runtime_llm.py` の 2660 行付近）: role=system、本文 `[Handy Tool: 名前]\n結果`、タグ `conversation` `handy_tool`、metadata に `__system_notice__: "handy_tool"`。
 - ツールの結果の文はキャラクターを付けず、客観的な丁寧語で書く。
-- `memory_recall`: Chronicle、Memopedia、Fragment、メッセージをキーワードで検索する。既存の `terms` の分割を使う。
+- 最終応答は今回のラウンドの非空の assistant 発話だけ。無ければ失敗として扱う。
+- 応答の途中で `memory_write` が書き込みに成功していたら、失敗してもそのターンの行を消さず、失敗を画面に出す。ツール上限に達したときも同じ。再生成では元の返答も戻して両方を残す。書き込みが無いターンの失敗は巻き戻す。
+- 再生成の対象は最後の user 行より後の応答。読む量に上限を置かない。`pulseId` のある応答はその pulse の行全部、v1 の `pulseId` の無い行は最後の user 行より後の行全部を置き換える。
+- `memory_recall`: Chronicle、Memopedia、Fragment、メッセージをキーワードで検索する。既存の `terms` の分割を使う。件数の上限はそのままで、メッセージは全文を返す。ページとあらすじは短縮する。
 - `memory_read`: `m:3`、`c:2`、`core`、`ch:5` の参照を読む。参照の文法は本体の `saiverse/references.py` に合わせる。
 - `memory_write`: 本体の `memory_write` スペルと同じ意味にする。コア記憶の新規と上書き、ページの追記と新規作成。
 
@@ -179,7 +191,9 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 6. head と Chronicle を作り直し、合言葉を作り直す。
 
 - 失敗したら開始位置を進めない。`metabolismError` を設定して画面に出す。次の応答の後にやり直す。
-- 構造化出力が使えないプロバイダではスルースを飛ばして進み、そのことを画面に出す。
+- 構造化出力が使えないプロバイダではスルースを飛ばして進み、そのことを画面に出す。OpenAI 互換のサーバーが構造化出力の指定に HTTP 400 / 422 / 501 を返したときも、失敗ではなく同じ扱いにする。
+- スルースのコア記憶の操作と機構の記録は `writePersonaRecords` の一つのトランザクションで書く。
+- 一次あらすじは抽出待ちの記録（`extractionBacklog`）と同じトランザクションで保存し、抽出の成功で消す。
 - プロンプトの文面は本体からそのまま移す。Lite 用に変えるのは Building と Spell と手帳に触れる箇所だけで、変えた箇所を一覧にして報告する。
 - 同時に走るのはペルソナごとに一つだけ。`navigator.locks` があれば使い、無ければメモリの中の印で止める。
 - 応答前に上限を超えているとき（取り込み直後など）は、応答の前に Metabolism を実行する。失敗しても応答は止めない。
@@ -244,6 +258,7 @@ You are a highly capable, thoughtful, and precise assistant. Your **pseudo** goa
 - `importing` のペルソナは会話と記憶の画面の代わりに、同じ ZIP で続きから入れる案内を出す。
 - `metabolismError` は閉じられない（次の成功で消える。`chatService` が事前の実行を飛ばす判定に使う）。`metabolismNotice` は閉じると消す。
 - 添付画像は ZIP から読んで会話の画面に出す。LLM へは本体の `[画像: uri]` の文字の形で送る。
+- フルバックアップの画面に、ペルソナまるごとパックの添付と手帳は含まれないことを出す。利用者が決めるのは、元の ZIP を自分で保管するかどうか。
 
 ## 検証
 

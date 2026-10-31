@@ -28,12 +28,22 @@ export interface PersonaRecordBatch {
   messages?: ChatMessage[];
   pages?: PageRecord[];
   fragments?: FragmentRecord[];
+  /** Applied to the persona's session in the same transaction. Runs synchronously. */
+  session?: (session: PersonaSession) => PersonaSession;
 }
 
 export function assertBatchOwner(personaId: string, batch: PersonaRecordBatch): void {
   const rows = [...(batch.threads ?? []), ...(batch.messages ?? []), ...(batch.pages ?? []), ...(batch.fragments ?? [])];
   const stray = rows.find((row) => row.personaId !== personaId);
   if (stray) throw new Error(`Batch for ${personaId} holds a row of ${stray.personaId}: ${stray.id}`);
+}
+
+/** Threads and messages are keyed by id alone, so a batch can name a row another persona already has. */
+export class RowOwnerError extends Error {
+  constructor(readonly ownerPersonaId: string) {
+    super("この中の会話は、すでに別のパートナーの会話と重なっているため書き込めません。");
+    this.name = "RowOwnerError";
+  }
 }
 
 export interface LiteRepository {
@@ -81,7 +91,10 @@ export interface LiteRepository {
   /** Reads and writes in one step, so a response and a background Metabolism cannot overwrite each other. `update` runs synchronously. */
   updateSession(personaId: string, update: (session: PersonaSession) => PersonaSession): Promise<PersonaSession>;
 
-  /** All or nothing. Rows with an existing key are replaced, so a stopped import can run again. */
+  /**
+   * All or nothing. Rows with an existing key are replaced, so a stopped import can run again.
+   * A thread or message that belongs to another persona throws RowOwnerError and nothing is written.
+   */
   writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void>;
 
   listProviders(): Promise<ProviderConfig[]>;

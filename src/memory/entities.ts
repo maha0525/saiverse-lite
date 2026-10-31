@@ -293,6 +293,11 @@ async function setBacklogItem(repository: LiteRepository, personaId: string, ent
   }));
 }
 
+/** Takes an entry off the backlog `compileFold` put it on. */
+export async function finishExtraction(repository: LiteRepository, personaId: string, entryId: string): Promise<void> {
+  await setBacklogItem(repository, personaId, entryId, null);
+}
+
 /**
  * body: `retry_extraction_backlog`. The attempt is counted before the LLM call, so a
  * run killed mid-way still uses one up. A partly missing source stays in the backlog:
@@ -312,7 +317,7 @@ export async function retryExtractionBacklog(repository: LiteRepository, persona
     const found = entry ? await Promise.all(entry.sourceIds.map((id) => repository.getMessage(id))) : [];
     const messages = found.filter((message): message is ChatMessage => message !== undefined);
     if (messages.length === 0) {
-      await setBacklogItem(repository, personaId, item.entryId, null);
+      await finishExtraction(repository, personaId, item.entryId);
       continue;
     }
     if (messages.length < found.length) {
@@ -321,7 +326,7 @@ export async function retryExtractionBacklog(repository: LiteRepository, persona
     }
     try {
       await extractAndReflect(repository, personaId, llm, messages, item.entryId);
-      await setBacklogItem(repository, personaId, item.entryId, null);
+      await finishExtraction(repository, personaId, item.entryId);
     } catch (error) {
       console.error("[SAIVerse Lite][entities] backlog retry failed", { entryId: item.entryId, error });
     }

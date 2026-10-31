@@ -467,7 +467,7 @@ async function runExport(
     const file = await work.file();
     const warnings = warningsOf(run, stored !== null);
     console.log("[SAIVerse Lite][pack] persona exported", { personaId, bytes: file.size, withOriginalZip: stored !== null, created: run.changes.messages.created.length, edited: run.changes.messages.edited.length, deleted: run.changes.messages.deleted.length, warnings: warnings.length });
-    return { file, fileName: `${personaId.replace(/[^A-Za-z0-9_.-]/g, "_")}_persona_pack.zip`, changes: run.changes, warnings };
+    return { file, fileName: packFileName(persona.name, new Date()), changes: run.changes, warnings };
   } catch (error) {
     await work?.abort().catch((abortError: unknown) => console.warn("[SAIVerse Lite][pack] work file could not be dropped", abortError));
     if (error instanceof DOMException && error.name === "QuotaExceededError") throw new PackError("端末の空き容量が足りません。空きを作ってから、もう一度書き出してください。");
@@ -475,6 +475,13 @@ async function runExport(
   } finally {
     await archive?.close().catch((error: unknown) => console.warn("[SAIVerse Lite][pack] ZIP could not be closed", error));
   }
+}
+
+/** The name the body gives its own export: api/routes/people/persona_pack.py. */
+export function packFileName(personaName: string, now: Date): string {
+  const stem = personaName.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim().replace(/^\.+|\.+$/g, "") || "persona";
+  const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+  return `${stem}_persona_pack_${date}.zip`;
 }
 
 /**

@@ -64,7 +64,7 @@ export function PackExportCard({ persona, busy, onExport }: PackExportCardProps)
       <span className="card-icon" aria-hidden="true"><Undo2 size={20} strokeWidth={1.8} /></span>
       <h2>本体へ帰す</h2>
       {result
-        ? <p>保存した ZIP を、本体の記憶の画面の引っ越しタブで{persona.name}に合流させてください。</p>
+        ? <p>書き出しました。ZIP を保存して、本体の記憶の画面の引っ越しタブで{persona.name}に合流させてください。</p>
         : <p>{persona.name}のこの端末での会話と記憶を、本体へ戻せる ZIP に書き出します。</p>}
       {result?.warnings.map((warning) => <p key={warning} className="field-help">{warning}</p>)}
       {running && <div className="field" role="status">

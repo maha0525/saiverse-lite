@@ -7,7 +7,7 @@ import { MemoryRepository } from "../storage/memoryRepository";
 import type { LiteRepository } from "../storage/repository";
 import { PackArchive } from "./archive";
 import { readAttachment } from "./attachments";
-import { exportPersonaPack, type PackExportResult } from "./exportPack";
+import { exportPersonaPack, packFileName, type PackExportResult } from "./exportPack";
 import { PackError, decodeValue, encodeValue, epochToIso, parseJson, stringifyJson } from "./format";
 import { importPersonaPack } from "./importPack";
 import { MemoryPackStore } from "./packStore";
@@ -490,5 +490,16 @@ describe("PackArchive", () => {
     expect(archive.has(CHANGES)).toBe(true);
     expect(await archive.fingerprint()).toMatch(/^[0-9a-f]{64}$/);
     await archive.close();
+  });
+});
+
+describe("packFileName", () => {
+  it("names the ZIP like the body's export: the persona's name and the date", () => {
+    expect(packFileName("ソフィー", new Date(2026, 10, 1))).toBe("ソフィー_persona_pack_20261101.zip");
+  });
+
+  it("replaces what a file name cannot hold and never comes back empty", () => {
+    expect(packFileName(' a/b:c?". ', new Date(2026, 0, 9))).toBe("a_b_c___persona_pack_20260109.zip");
+    expect(packFileName("...", new Date(2026, 0, 9))).toBe("persona_persona_pack_20260109.zip");
   });
 });

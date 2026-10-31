@@ -155,8 +155,8 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 - `lineRole` が null か `main_line`、かつ `scope` が null か `committed`。committed の `meta_judgment` も通る。
 - `pairedActionText` の扱いは本体の anchor 経路に合わせる。
 - 開始位置が無いとき（intent §12「取り込み直後の開始位置」）:
-  1. `activeThreadId` のスレッドの中で、どの一次あらすじの `source_ids` にも入っていない、最も古い提示対象の行。別のスレッドは見ない。編纂対象の判定は `sai_memory/arasuji/storage.py` の `get_frontier_anchor_id` と同じ。
-  2. 全部入っていれば、新しい側から残す量の字数に届く行。
+  1. `activeThreadId` のスレッドの中で、新しい側から見て、一次あらすじの `source_ids` に入っている最初の行より後の、提示対象の最も古い行。これより古い場所に残った未編纂の行は開始位置にしない（本体でも送る範囲の外にある行で、起点にすると編纂済みの会話まで送り直す）。別のスレッドは見ない。編纂対象の判定は `sai_memory/arasuji/storage.py` の `get_frontier_anchor_id` と同じ。
+  2. スレッドの末尾が編纂済みなら、新しい側から残す量の字数に届く行。
 - 会話の行が残す量を下回っていたら、開始位置より古い行を不足分だけ足す（`sea/session_lifecycle.py` の `ensure_window_floor`）。
 - 上限を超えていたら、最初の応答の前に Metabolism を走らせる。
 - 画面で開いたスレッドが `activeThreadId` になる（`src/memory/session.ts` の `activateThread`）。別のスレッドへ移ると `anchorMessageId` を消して上の規則で決め直し、head と Chronicle も作り直す。`importing` のペルソナでは何もしない。

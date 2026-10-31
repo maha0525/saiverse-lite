@@ -188,12 +188,14 @@ export async function resolveInitialAnchor(repository: LiteRepository, personaId
   if (!threadId) return null;
   const covered = coveredMessageIds(chronicleEntries(await repository.listPages(personaId, CATEGORY_CHRONICLE)));
 
+  // Only the uncompiled tail. Rows left uncompiled before a covered row were
+  // already outside the window on the body, and starting there resends everything
+  // compiled after them.
   let firstUncovered: ChatMessage | null = null;
-  for await (const row of walkThread(repository, threadId, "forward")) {
-    if (isPresentedRow(row) && isChronicleEligible(row) && !covered.has(row.id)) {
-      firstUncovered = row;
-      break;
-    }
+  for await (const row of walkThread(repository, threadId, "backward")) {
+    if (!isPresentedRow(row) || !isChronicleEligible(row)) continue;
+    if (covered.has(row.id)) break;
+    firstUncovered = row;
   }
   if (!firstUncovered) {
     const fromNewest = await olderRowReaching(repository, threadId, undefined, METABOLISM_TARGET_CHARS);

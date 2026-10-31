@@ -145,6 +145,21 @@ describe("resolveInitialAnchor", () => {
     const window = await readWindow(f.repository, f.thread.id, anchor!);
     expect(window.reduce((sum, message) => sum + message.content.length, 0)).toBeGreaterThanOrEqual(METABOLISM_TARGET_CHARS);
   });
+
+  it("ignores rows left uncovered before the newest covered row", async () => {
+    const f = await fixture();
+    const rows = await seed(f, 100, 1000);
+    const chronicle = await f.repository.listPages(f.persona.id, CATEGORY_CHRONICLE);
+    await f.repository.putPage({
+      ...chronicle[0]!, id: "entry-1", isTrunk: false, parentId: "root_chronicle", shortId: 50,
+      metadata: { level: 1, source_ids: rows.slice(3, 90).map((message) => message.id), start_time: 1, end_time: 2 },
+    });
+    await f.repository.updateSession(f.persona.id, (session) => ({ ...session, activeThreadId: f.thread.id }));
+    const anchor = await resolveInitialAnchor(f.repository, f.persona.id);
+    const window = await readWindow(f.repository, f.thread.id, anchor!);
+    expect(window.length).toBeLessThan(30);
+    expect(window.reduce((sum, message) => sum + message.content.length, 0)).toBeGreaterThanOrEqual(METABOLISM_TARGET_CHARS);
+  });
 });
 
 describe("Metabolism end to end with the mock provider", () => {

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import logoUrl from "../assets/logo.png";
 import { API_KEY_GUIDES, type GuideProviderId } from "../apiKeyGuideData";
 import { newId, type AnthropicCacheTtl, type Persona, type ProviderConfig } from "../domain";
-import { importChatGptFile, importClaudeFile, type OfficialImportResult } from "../importers";
+import { importChatGptFile, importClaudeFile, saveSaiverseMemoryImport, type OfficialImportResult } from "../importers";
 import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
 import {
   buildPersonaPrompt,
@@ -139,9 +139,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
       if (kind === "saiverse-native") {
         const { importSaiverseMemory } = await import("../formats");
         const imported = importSaiverseMemory(JSON.parse(await file.text()), persona.id);
-        for (const thread of imported.threads) await props.repository.putThread(thread);
-        for (const message of imported.messages) await props.repository.putMessage(message);
-        for (const memory of imported.memories) await props.repository.putMemory(memory);
+        await saveSaiverseMemoryImport(props.repository, persona.id, imported);
         setNotice(`${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`);
       } else {
         const result: OfficialImportResult = kind === "chatgpt"

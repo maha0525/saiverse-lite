@@ -1,9 +1,11 @@
 import {
+  createChatMessage,
+  handyToolRecord,
   newId,
   type AppSettings,
   type ChatMessage,
   type ConversationThread,
-  type MemoryEntry,
+  type PageRecord,
   type Persona,
   type ToolCall,
   type ToolId,
@@ -12,6 +14,7 @@ import { ChatOperationError, type ChatOperation } from "./chatErrors";
 import { createProvider } from "./llm";
 import type { RetryAttempt, RetryNotice } from "./llm/retry";
 import type { ProviderMessage } from "./llm/types";
+import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
 import { requiresApiKey } from "./providerDefaults";
 import type { LiteRepository } from "./storage/repository";
 import { executeTool, toolDefinitionsFor } from "./tools";
@@ -27,6 +30,8 @@ export interface ChatCallbacks {
 
 const TOOL_STATUS: Record<ToolId, string> = {
   memory_recall: "記憶を確認しています…",
+  memory_read: "記憶を読んでいます…",
+  memory_write: "記憶に書いています…",
   image_generate: "画像を生成しています…",
 };
 
@@ -50,43 +55,22 @@ function retryStatusText(providerLabel: string, attempt: RetryAttempt): string {
   return `${providerLabel}${reason}。${wait}（${attempt.attempt}/${attempt.maxAttempts}回目）`;
 }
 
-function toolCallsFromMetadata(metadata: Record<string, unknown>): ToolCall[] {
-  if (!Array.isArray(metadata.tool_calls)) return [];
-  return metadata.tool_calls.flatMap((value) => {
-    if (typeof value !== "object" || value === null) return [];
-    const item = value as Record<string, unknown>;
-    if (typeof item.id !== "string" || (item.name !== "memory_recall" && item.name !== "image_generate")) return [];
-    return [{
-      id: item.id,
-      name: item.name,
-      arguments: typeof item.arguments === "object" && item.arguments !== null ? item.arguments as Record<string, unknown> : {},
-      // Must survive the round trip through storage: the next request replays it.
-      ...(typeof item.thoughtSignature === "string" && item.thoughtSignature
-        ? { thoughtSignature: item.thoughtSignature }
-        : {}),
-    }];
-  });
-}
-
+// Native tool calls live only inside one response; a stored row is plain text.
 function toProviderMessage(message: ChatMessage): ProviderMessage {
-  const providerState = message.metadata.lite_provider_state;
   return {
-    role: message.role,
+    role: message.role === "assistant" ? "assistant" : "user",
     content: message.content,
-    toolCallId: message.toolCallId,
-    toolName: message.toolName,
-    toolCalls: toolCallsFromMetadata(message.metadata),
-    ...(typeof providerState === "object" && providerState !== null && !Array.isArray(providerState)
-      ? { providerState: providerState as Record<string, unknown> }
-      : {}),
+    toolCallId: null,
+    toolName: null,
+    toolCalls: [],
   };
 }
 
-function memoryContext(memories: MemoryEntry[]): string {
+function memoryContext(memories: PageRecord[]): string {
   let remaining = 6_000;
   const selected: string[] = [];
   for (const memory of memories.slice(0, 16)) {
-    const line = `- [${memory.kind}] ${memory.content.trim()}`;
+    const line = `- [${String(memory.metadata.kind)}] ${memory.content.trim()}`;
     if (!line.trim() || line.length > remaining) continue;
     selected.push(line);
     remaining -= line.length;
@@ -141,23 +125,22 @@ export class ChatService {
   ): Promise<ChatMessage> {
     const messagesBefore = await this.repository.listMessages(thread.id);
     const now = Date.now();
-    const userMessage: ChatMessage = {
+    const pulseId = newId("pulse");
+    const userMessage = createChatMessage({
       id: newId("message"),
       threadId: thread.id,
       personaId: persona.id,
       role: "user",
       content: content.trim(),
       createdAt: now,
-      editedAt: null,
-      toolCallId: null,
-      toolName: null,
-      metadata: {},
-    };
+      seq: await this.repository.nextMessageSeq(persona.id),
+      pulseId,
+    });
     try {
       await this.repository.putMessage(userMessage);
       await this.repository.putThread({ ...thread, updatedAt: now, title: thread.title === "新しい会話" ? content.trim().slice(0, 36) || thread.title : thread.title });
       callbacks.onUserMessageStored?.(userMessage);
-      return await this.continueConversation(persona, thread.id, callbacks, signal);
+      return await this.continueConversation(persona, thread.id, pulseId, callbacks, signal);
     } catch (error) {
       throw await this.rollbackConversation("send", thread, messagesBefore, error);
     }
@@ -172,10 +155,10 @@ export class ChatService {
     const thread = await this.repository.getThread(threadId);
     if (!thread) throw new Error("会話スレッドが見つかりません");
     const messages = await this.repository.listMessages(threadId);
-    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant" && toolCallsFromMetadata(message.metadata).length === 0);
+    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
     try {
       if (lastAssistant) await this.repository.deleteMessage(lastAssistant.id);
-      return await this.continueConversation(persona, threadId, callbacks, signal);
+      return await this.continueConversation(persona, threadId, newId("pulse"), callbacks, signal);
     } catch (error) {
       throw await this.rollbackConversation("regenerate", thread, messages, error);
     }
@@ -184,17 +167,35 @@ export class ChatService {
   private async continueConversation(
     persona: Persona,
     threadId: string,
+    pulseId: string,
     callbacks: ChatCallbacks,
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
+    const store = async (fields: Pick<ChatMessage, "role" | "content" | "metadata">): Promise<ChatMessage> => {
+      const message = createChatMessage({
+        ...fields,
+        id: newId("message"),
+        threadId,
+        personaId: persona.id,
+        createdAt: Date.now(),
+        seq: await this.repository.nextMessageSeq(persona.id),
+        pulseId,
+      });
+      await this.repository.putMessage(message);
+      return message;
+    };
     const config = await this.repository.getProvider(persona.providerId);
     if (!config) throw new Error("選択されたプロバイダ設定がありません");
     if (requiresApiKey(config.kind) && !config.apiKey) throw new Error(`${config.label} のAPIキーを設定してください`);
     const provider = createProvider(config);
     const settings = await this.repository.getSettings();
     const definitions = toolDefinitionsFor(persona, config);
-    const memories = await this.repository.listMemories(persona.id);
-    let messages = await this.repository.listMessages(threadId);
+    const memories = liveCoreMemories(await this.repository.listPages(persona.id, CATEGORY_CORE));
+    // A v1 row whose only content was a tool call is empty now, and some providers reject empty turns.
+    const conversation = (await this.repository.listMessages(threadId))
+      .filter((message) => message.role !== "assistant" || message.content.trim() !== "")
+      .slice(-settings.recentContextMessages)
+      .map(toProviderMessage);
     let finalMessage: ChatMessage | null = null;
 
     for (let round = 0; round < 4; round += 1) {
@@ -211,12 +212,11 @@ export class ChatService {
       let outputTokens = 0;
       let cachedTokens = 0;
       let providerState: Record<string, unknown> | null = null;
-      const recent = messages.slice(-settings.recentContextMessages).map(toProviderMessage);
       for await (const event of provider.stream({
         model: persona.model || config.defaultModel,
         systemPrompt: systemPromptWithUserIdentity(persona.systemPrompt, settings),
         memoryContext: memoryContext(memories),
-        messages: recent,
+        messages: conversation,
         tools: definitions,
         toolChoice: "auto",
         onRetry,
@@ -241,28 +241,22 @@ export class ChatService {
         }
       }
 
-      const assistant: ChatMessage = {
-        id: newId("message"),
-        threadId,
-        personaId: persona.id,
-        role: "assistant",
-        content: text,
-        createdAt: Date.now(),
-        editedAt: null,
-        toolCallId: null,
-        toolName: null,
-        metadata: {
-          usage: usageMetadata(inputTokens, outputTokens, cachedTokens),
-          ...(calls.length ? { tool_calls: calls } : {}),
-          ...(providerState ? { lite_provider_state: providerState } : {}),
-        },
-      };
-      await this.repository.putMessage(assistant);
-      messages.push(assistant);
+      const usage = { usage: usageMetadata(inputTokens, outputTokens, cachedTokens) };
       if (calls.length === 0) {
-        finalMessage = assistant;
+        finalMessage = await store({ role: "assistant", content: text, metadata: usage });
         break;
       }
+      // What the persona said before calling a tool is its speech and is kept.
+      // The call itself stays in memory for the rest of this response.
+      if (text) await store({ role: "assistant", content: text, metadata: usage });
+      conversation.push({
+        role: "assistant",
+        content: text,
+        toolCallId: null,
+        toolName: null,
+        toolCalls: calls,
+        ...(providerState ? { providerState } : {}),
+      });
       for (const call of calls) {
         callbacks.onStatus?.(TOOL_STATUS[call.name]);
         let resultContent: string;
@@ -278,20 +272,8 @@ export class ChatService {
           resultMetadata = { error: true };
           console.error("[SAIVerse Lite][tool] execution failed", { tool: call.name, error });
         }
-        const toolMessage: ChatMessage = {
-          id: newId("message"),
-          threadId,
-          personaId: persona.id,
-          role: "tool",
-          content: resultContent,
-          createdAt: Date.now(),
-          editedAt: null,
-          toolCallId: call.id,
-          toolName: call.name,
-          metadata: resultMetadata,
-        };
-        await this.repository.putMessage(toolMessage);
-        messages.push(toolMessage);
+        await store(handyToolRecord(call.name, resultContent, resultMetadata));
+        conversation.push({ role: "tool", content: resultContent, toolCallId: call.id, toolName: call.name, toolCalls: [] });
       }
     }
     if (!finalMessage) throw new Error("ツール呼び出しが上限を超えました");

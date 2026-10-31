@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatStatusTone } from "../chatService";
-import type { AppSettings, ChatMessage, ConversationThread, Persona } from "../domain";
+import { HANDY_TOOL_NOTICE, SYSTEM_NOTICE_KEY, type AppSettings, type ChatMessage, type ConversationThread, type Persona } from "../domain";
 import { formatLoadingElapsedMessage, type LiteRtEngineStatus } from "../llm/litertEngine";
 import { loadDraft, saveDraft } from "../onboarding";
 import { ThreadManagerDialog } from "./ThreadManagerDialog";
@@ -37,10 +37,12 @@ function time(value: number): string {
 
 function MessageBubble({ message, persona, settings, disabled, onEdit, onDelete }: { message: ChatMessage; persona: Persona; settings: AppSettings; disabled: boolean; onEdit(message: ChatMessage, content: string): Promise<void>; onDelete(message: ChatMessage): Promise<void> }) {
   const imageDataUrl = typeof message.metadata.imageDataUrl === "string" ? message.metadata.imageDataUrl : null;
-  if (message.role === "tool") {
+  if (message.role === "system" || message.role === "host") {
+    const handyTool = message.metadata[SYSTEM_NOTICE_KEY] === HANDY_TOOL_NOTICE;
+    const summary = !handyTool ? "システムの記録" : message.content.startsWith("[Handy Tool: image_generate]") ? "画像を生成しました" : "記憶を確認しました";
     return (
       <details className="tool-result">
-        <summary>{message.toolName === "image_generate" ? "画像を生成しました" : "記憶を確認しました"}</summary>
+        <summary>{summary}</summary>
         {imageDataUrl && <img src={imageDataUrl} alt="AIがツールで生成した画像" />}
         <pre>{message.content}</pre>
       </details>

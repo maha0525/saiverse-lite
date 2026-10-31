@@ -15,18 +15,19 @@ import {
   type AppSettings,
   type ChatMessage,
   type ConversationThread,
-  type MemoryEntry,
+  type PageRecord,
   type Persona,
   type ProviderConfig,
 } from "./domain";
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
-import { saveClaudeMemories, saveImportedConversations, type ClaudeMemoryText, type ImportedConversation } from "./importers";
+import { saveClaudeMemories, saveImportedConversations, saveSaiverseMemoryImport, type ClaudeMemoryText, type ImportedConversation } from "./importers";
 import { ensureEngine, getEngineStatus, subscribe as subscribeLiteRtEngine, type LiteRtEngineStatus } from "./llm/litertEngine";
 import { isLiteRtModelId } from "./llm/litertModels";
 import type { ConversationImportTarget } from "./components/OfficialImportDialog";
 import { LEGAL_VERSION } from "./legal";
 import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
+import { CATEGORY_CORE, epochSeconds, liveCoreMemories, softDeleteCoreMemory } from "./pageRecords";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
 
@@ -52,6 +53,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function loadCoreMemories(personaId: string): Promise<PageRecord[]> {
+  return liveCoreMemories(await repository.listPages(personaId, CATEGORY_CORE));
+}
+
 export default function App() {
   const [view, setView] = useState<AppView>("chat");
   const [loading, setLoading] = useState(true);
@@ -63,7 +68,7 @@ export default function App() {
   const [threads, setThreads] = useState<ConversationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [memories, setMemories] = useState<PageRecord[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [chatStatus, setChatStatus] = useState<{ text: string; tone: ChatStatusTone }>({ text: "", tone: "info" });
   const [sending, setSending] = useState(false);
@@ -132,7 +137,7 @@ export default function App() {
       nextThreads = [thread];
     }
     setThreads(nextThreads);
-    setMemories(await repository.listMemories(personaId));
+    setMemories(await loadCoreMemories(personaId));
     const nextThreadId = preferredThreadId && nextThreads.some((thread) => thread.id === preferredThreadId)
       ? preferredThreadId
       : nextThreads[0]?.id ?? null;
@@ -238,7 +243,7 @@ export default function App() {
     if (!selectedPersona || sending) return false;
     const requestedIds = new Set(ids);
     const targets = threads.filter((thread) => requestedIds.has(thread.id));
-    if (targets.length === 0 || !window.confirm(`${targets.length}件の会話を削除しますか？\n選んだ会話の発言と、会話に紐づく記憶は元に戻せません。`)) return false;
+    if (targets.length === 0 || !window.confirm(`${targets.length}件の会話を削除しますか？\n選んだ会話の発言は元に戻せません。`)) return false;
     try {
       await repository.deleteThreads(targets.map((thread) => thread.id));
       for (const target of targets) saveDraft(`composer.${target.id}`, "");
@@ -314,7 +319,6 @@ export default function App() {
     try {
       await repository.deleteMessage(message.id);
       await loadThread(message.threadId);
-      if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
       setNotice(`${speaker}の発言を削除しました。`);
     } catch (error) {
       console.error("[SAIVerse Lite][chat] Failed to delete message", { messageId: message.id, error });
@@ -366,24 +370,23 @@ export default function App() {
   };
   const createMemory = async (content: string) => {
     if (!selectedPersona) return;
-    const now = Date.now();
-    await repository.putMemory({ id: newId("memory"), personaId: selectedPersona.id, threadId: null, kind: "note", content, sourceMessageIds: [], createdAt: now, updatedAt: now });
-    setMemories(await repository.listMemories(selectedPersona.id));
+    await repository.addCoreMemories(selectedPersona.id, [{ content }]);
+    setMemories(await loadCoreMemories(selectedPersona.id));
   };
-  const editMemory = async (memory: MemoryEntry, content: string) => {
-    await repository.putMemory({ ...memory, content, updatedAt: Date.now() });
-    if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
+  const editMemory = async (memory: PageRecord, content: string) => {
+    await repository.putPage({ ...memory, content, updatedAt: epochSeconds(Date.now()) });
+    setMemories(await loadCoreMemories(memory.personaId));
   };
-  const deleteMemory = async (id: string) => {
+  const deleteMemory = async (memory: PageRecord) => {
     if (!window.confirm("この記憶を削除しますか？")) return;
-    await repository.deleteMemory(id);
-    if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
+    await repository.putPage(softDeleteCoreMemory(memory, epochSeconds(Date.now())));
+    setMemories(await loadCoreMemories(memory.personaId));
   };
 
   const exportCurrentMemory = async () => {
     if (!selectedPersona) return;
     const snapshot = await repository.exportSnapshot();
-    const value = exportSaiverseMemory(selectedPersona, snapshot.threads, snapshot.messages, snapshot.memories);
+    const value = exportSaiverseMemory(selectedPersona, snapshot.threads, snapshot.messages, snapshot.pages);
     downloadJson(`${selectedPersona.id}_saiverse-memory.json`, value);
   };
 
@@ -404,7 +407,7 @@ export default function App() {
       onExportMemory={exportCurrentMemory}
       onExportBackup={() => runDataAction(async () => { downloadJson("saiverse-lite-backup.json", exportFullBackup(await repository.exportSnapshot())); return "フルバックアップを書き出しました。"; })}
       onImportBackup={(file) => runDataAction(async () => { if (!window.confirm("現在の端末内データをバックアップ内容で置き換えますか？")) return "復元をキャンセルしました。"; await repository.replaceSnapshot(parseFullBackup(JSON.parse(await file.text()))); await refreshBase(); return "バックアップを復元しました。APIキーは再入力してください。"; })}
-      onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); for (const thread of imported.threads) await repository.putThread(thread); for (const message of imported.messages) await repository.putMessage(message); for (const memory of imported.memories) await repository.putMemory(memory); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
+      onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); await saveSaiverseMemoryImport(repository, selectedPersona.id, imported); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
       onImportOfficial={async (target: ConversationImportTarget, conversations: ImportedConversation[], memories: ClaudeMemoryText[]) => {
         setDataBusy(true);
         setNotice("");

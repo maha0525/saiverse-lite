@@ -76,19 +76,17 @@ Lite adds namespaced metadata without replacing existing metadata:
 - `lite_message_id`
 - `lite_thread_id`
 - `edited_at`
-- `tool_call_id`
-- `tool_name`
-- `lite_provider_state` (optional opaque state required to continue a stateless
-  provider response, currently OpenAI Responses encrypted reasoning/output items)
 - tags `conversation` and `saiverse_lite`
 
-`lite_provider_state` is transport continuity data, not persona memory or hidden
-reasoning text. OpenAI Responses is called with `store: false`; Lite therefore keeps
-the returned opaque output items on-device and replays them when a function call
-continues. Importers must preserve this metadata field but should not interpret it.
+Tool results are exported as stored: `role: "system"`, content
+`[Handy Tool: <name>]\n<result>`, tags `conversation` and `handy_tool`, and
+`__system_notice__: "handy_tool"`. Older exports hold `role: "tool"` rows with
+`tool_call_id` / `tool_name`, and assistant rows with `tool_calls` /
+`lite_provider_state`; the importer converts them to this form and drops those fields.
 
-User-authored and imported memory notes are exported as messages in the synthetic thread
-`<persona-id>:lite-memory`. Their metadata contains:
+Core memories are exported as messages in the synthetic thread
+`<persona-id>:lite-memory`, leaving out soft-deleted ones. Importing turns those rows
+back into core memories. Their metadata contains:
 
 - tags `memory`, `note`, and `saiverse_lite`
 - `lite_memory_id`
@@ -99,20 +97,23 @@ User-authored and imported memory notes are exported as messages in the syntheti
 This uses fields already preserved by the body native importer. The Lite round-trip test
 asserts preservation of thread IDs, message IDs, content, roles, and memory entries.
 
-## 3. Full backup: `saiverse_lite_backup_v1`
+## 3. Full backup: `saiverse_lite_backup_v2`
 
-The full backup is a UTF-8 JSON snapshot of all Lite object stores:
+The full backup is a UTF-8 JSON snapshot of the Lite object stores. The record shapes are
+in `docs/memory_core.md`:
 
 ```json
 {
-  "format": "saiverse_lite_backup_v1",
-  "exported_at": "2026-07-15T00:00:00.000Z",
+  "format": "saiverse_lite_backup_v2",
+  "exported_at": "2026-10-31T00:00:00.000Z",
   "includes_api_keys": false,
   "data": {
     "personas": [],
     "threads": [],
     "messages": [],
-    "memories": [],
+    "pages": [],
+    "fragments": [],
+    "sessions": [],
     "providers": [],
     "settings": {}
   }
@@ -123,12 +124,16 @@ Provider records are included so models and compatible URLs survive migration, b
 `apiKey` is replaced with an empty string. Keys must be entered again on the destination
 device. Restore replaces the entire local database after explicit confirmation.
 
+`saiverse_lite_backup_v1` still restores. It held `memories` instead of `pages`,
+`fragments`, and `sessions`, and message rows with role `tool`; restoring applies the same
+conversion as the database migration (`src/storage/legacyData.ts`).
+
 ## 4. Retired automatic summaries
 
 Lite-specific automatic summaries were retired before the official release in favor of
-future SAIVerse Chronicle / Memopedia compatibility. On startup, stored
-`MemoryEntry(kind="summary")` rows are deleted. Restore and native import also discard
-legacy summary rows so an older backup cannot reintroduce them. The legacy settings
+SAIVerse Chronicle / Memopedia compatibility. Summary rows (`MemoryEntry` with
+`kind="summary"`) are not converted to core memories by the database migration, a v1
+restore, or a native import, so an older file cannot reintroduce them. The legacy settings
 `autoSummaryEnabled` and `summaryEveryMessages` are ignored and removed when settings
 are saved again.
 

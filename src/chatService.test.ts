@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatService, systemPromptWithUserIdentity } from "./chatService";
 import { ChatOperationError } from "./chatErrors";
-import { createDefaultPersona, DEFAULT_SETTINGS, newId, type ChatMessage, type ConversationThread, type MemoryEntry } from "./domain";
+import { createChatMessage, createDefaultPersona, DEFAULT_SETTINGS, newId, type ChatMessage, type ConversationThread } from "./domain";
 import { retryDefaults } from "./llm/retry";
+import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
 import { MemoryRepository } from "./storage/memoryRepository";
 
 const originalRetry = { ...retryDefaults };
@@ -21,7 +22,7 @@ describe("ChatService with mock provider", () => {
     await new ChatService(repository).send(persona, thread, "こんにちは", { onDelta: (delta) => { streamed += delta; } });
     expect(streamed).toContain("モック応答");
     expect(await repository.listMessages(thread.id)).toHaveLength(2);
-    expect(await repository.listMemories(persona.id)).toEqual([]);
+    expect(liveCoreMemories(await repository.listPages(persona.id, CATEGORY_CORE))).toEqual([]);
   });
 
   it("runs the registered memory recall tool and returns its result to the model", async () => {
@@ -29,15 +30,19 @@ describe("ChatService with mock provider", () => {
     await repository.initialize();
     const persona = createDefaultPersona();
     const now = Date.now();
-    const memory: MemoryEntry = {
-      id: newId("memory"), personaId: persona.id, threadId: null, kind: "note", content: "猫の名前はミケ", sourceMessageIds: [], createdAt: now, updatedAt: now,
-    };
-    await repository.putMemory(memory);
+    await repository.addCoreMemories(persona.id, [{ content: "猫の名前はミケ" }]);
     const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "新しい会話", createdAt: now, updatedAt: now };
     await repository.putThread(thread);
     const result = await new ChatService(repository).send(persona, thread, "猫の名前を思い出して");
     expect(result.content).toContain("ミケ");
-    expect((await repository.listMessages(thread.id)).some((message) => message.role === "tool" && message.toolName === "memory_recall")).toBe(true);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored.map((message) => message.role)).toEqual(["user", "system", "assistant"]);
+    expect(stored[1]?.content.startsWith("[Handy Tool: memory_recall]\n")).toBe(true);
+    expect(stored[1]?.metadata).toMatchObject({ tags: ["conversation", "handy_tool"], __system_notice__: "handy_tool" });
+    expect(stored.every((message) => message.metadata.tool_calls === undefined && message.metadata.lite_provider_state === undefined)).toBe(true);
+    expect(new Set(stored.map((message) => message.pulseId)).size).toBe(1);
+    expect(stored[0]?.pulseId).not.toBeNull();
+    expect(stored[2]!.seq).toBeGreaterThan(stored[1]!.seq);
   });
 
   it("reports the stored user message before the response pipeline finishes", async () => {
@@ -170,8 +175,8 @@ describe("ChatService with mock provider", () => {
     const persona = { ...createDefaultPersona(now), providerId: provider.id, model: provider.defaultModel };
     const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "既存の会話", createdAt: now, updatedAt: now };
     const previousMessages: ChatMessage[] = [
-      { id: newId("message"), threadId: thread.id, personaId: persona.id, role: "user", content: "前の質問", createdAt: now, editedAt: null, toolCallId: null, toolName: null, metadata: {} },
-      { id: newId("message"), threadId: thread.id, personaId: persona.id, role: "assistant", content: "前の返答", createdAt: now + 1, editedAt: null, toolCallId: null, toolName: null, metadata: {} },
+      createChatMessage({ id: newId("message"), threadId: thread.id, personaId: persona.id, role: "user", content: "前の質問", createdAt: now, seq: 1 }),
+      createChatMessage({ id: newId("message"), threadId: thread.id, personaId: persona.id, role: "assistant", content: "前の返答", createdAt: now + 1, seq: 2 }),
     ];
     await repository.putThread(thread);
     for (const message of previousMessages) await repository.putMessage(message);
@@ -191,6 +196,26 @@ describe("ChatService with mock provider", () => {
     expect((caught as ChatOperationError).operation).toBe("regenerate");
     expect((caught as ChatOperationError).rollbackSucceeded).toBe(true);
     expect(await repository.listMessages(thread.id)).toEqual(previousMessages);
+  });
+
+  it("does not send an empty assistant row left by a migrated tool call", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "移行した会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    await repository.putMessage(createChatMessage({ id: newId("message"), threadId: thread.id, personaId: persona.id, role: "assistant", content: "", createdAt: now, seq: 1 }));
+    const seen: string[][] = [];
+    const { MockProvider } = await import("./llm/mock");
+    const stream = MockProvider.prototype.stream;
+    vi.spyOn(MockProvider.prototype, "stream").mockImplementation(function (this: InstanceType<typeof MockProvider>, request) {
+      seen.push(request.messages.map((message) => message.content));
+      return stream.call(this, request);
+    });
+    await new ChatService(repository).send(persona, thread, "続き");
+    vi.restoreAllMocks();
+    expect(seen[0]).toEqual(["続き"]);
   });
 
   it("adds the configured user name to the system prompt", () => {

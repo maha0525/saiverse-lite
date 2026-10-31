@@ -1,12 +1,12 @@
 import { useState, type FormEvent } from "react";
-import type { MemoryEntry, Persona } from "../domain";
+import type { PageRecord, Persona } from "../domain";
 
 interface MemoryViewProps {
   persona: Persona;
-  memories: MemoryEntry[];
+  memories: PageRecord[];
   onCreate(content: string): Promise<void>;
-  onEdit(memory: MemoryEntry, content: string): Promise<void>;
-  onDelete(id: string): Promise<void>;
+  onEdit(memory: PageRecord, content: string): Promise<void>;
+  onDelete(memory: PageRecord): Promise<void>;
 }
 
 export function MemoryView({ persona, memories, onCreate, onEdit, onDelete }: MemoryViewProps) {
@@ -27,11 +27,11 @@ export function MemoryView({ persona, memories, onCreate, onEdit, onDelete }: Me
       <div className="memory-grid">
         {memories.map((memory) => (
           <article className="memory-card" key={memory.id}>
-            <div className="memory-card-head"><span className="memory-kind">記憶</span><time>{new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(memory.updatedAt)}</time></div>
+            <div className="memory-card-head"><span className="memory-kind">記憶</span><time>{new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(memory.updatedAt * 1000)}</time></div>
             <p>{memory.content}</p>
             <div className="memory-actions">
               <button className="text-button" onClick={() => { const next = window.prompt("記憶を訂正", memory.content); if (next?.trim() && next !== memory.content) void onEdit(memory, next.trim()); }}>訂正</button>
-              <button className="text-button danger" onClick={() => void onDelete(memory.id)}>削除</button>
+              <button className="text-button danger" onClick={() => void onDelete(memory)}>削除</button>
             </div>
           </article>
         ))}

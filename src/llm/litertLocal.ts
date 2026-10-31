@@ -28,7 +28,7 @@ import type {
   ToolDefinition,
 } from "./types";
 
-const KNOWN_TOOL_IDS: readonly ToolId[] = ["memory_recall", "image_generate"];
+const KNOWN_TOOL_IDS: readonly ToolId[] = ["memory_recall", "memory_read", "memory_write", "image_generate"];
 
 function isToolId(name: string): name is ToolId {
   return (KNOWN_TOOL_IDS as readonly string[]).includes(name);

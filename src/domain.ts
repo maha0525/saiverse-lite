@@ -3,8 +3,8 @@ export type ProviderKind = "mock" | "openai" | "anthropic" | "gemini" | "openai-
 /** Anthropic プロンプトキャッシュの TTL。書き込みは 5m=1.25倍 / 1h=2倍、読みは 0.1倍。
  *  返信間隔が TTL を超える使い方では逆に割高になるため、既定は "none" (ユーザーが明示的に選ぶ)。 */
 export type AnthropicCacheTtl = "none" | "5m" | "1h";
-export type MessageRole = "user" | "assistant" | "tool";
-export type ToolId = "memory_recall" | "image_generate";
+export type MessageRole = "user" | "assistant" | "system" | "host";
+export type ToolId = "memory_recall" | "memory_read" | "memory_write" | "image_generate";
 
 export interface Persona {
   id: string;
@@ -25,6 +25,10 @@ export interface ConversationThread {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** True for the body's Stelis threads, which are never presented or compiled. */
+  stelis?: boolean;
+  /** The pack row, kept as it came. */
+  source?: Record<string, unknown> | null;
 }
 
 export interface ToolCall {
@@ -39,21 +43,90 @@ export interface ToolCall {
   thoughtSignature?: string;
 }
 
+/** Field names follow the body's `messages` row: docs/memory_core.md. Rows sort by (createdAt, seq, id). */
 export interface ChatMessage {
   id: string;
   threadId: string;
   personaId: string;
   role: MessageRole;
   content: string;
+  /** Milliseconds. */
   createdAt: number;
+  seq: number;
   editedAt: number | null;
-  toolCallId: string | null;
-  toolName: ToolId | null;
+  scope: string | null;
+  lineRole: string | null;
+  /** Shared by every row of one response to a user input. */
+  pulseId: string | null;
+  pairedActionText: string | null;
   metadata: Record<string, unknown>;
+  /** The pack row as received. Lite never rewrites it. */
+  source: Record<string, unknown> | null;
+}
+
+export type MessagePosition = Pick<ChatMessage, "createdAt" | "seq" | "id">;
+
+export function compareMessagePosition(a: MessagePosition, b: MessagePosition): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  if (a.seq !== b.seq) return a.seq - b.seq;
+  // Code-unit comparison, the same order IndexedDB gives string keys.
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** One `memopedia_pages` row of the body. Chronicle entries and core memories are pages too. */
+export interface PageRecord {
+  id: string;
+  personaId: string;
+  parentId: string | null;
+  title: string;
+  summary: string;
+  content: string;
+  category: string;
+  /** Epoch seconds, as in the body. */
+  createdAt: number;
+  updatedAt: number;
+  keywords: string[];
+  metadata: Record<string, unknown>;
+  isDeleted: boolean;
+  vividness: string | null;
+  isTrunk: boolean;
+  isImportant: boolean;
+  lastReferencedAt: number | null;
+  shortId: number | null;
+  source: Record<string, unknown> | null;
+}
+
+/** One `memopedia_fragments` row of the body. */
+export interface FragmentRecord {
+  id: string;
+  personaId: string;
+  content: string;
+  entityId: string;
+  chronicleEntryId: string | null;
+  vividness: string | null;
+  sourceDate: string | null;
+  /** Epoch seconds, as in the body. */
+  createdAt: number;
+  source: Record<string, unknown> | null;
+}
+
+export type PersonaImportState = "ready" | "importing";
+
+export interface PersonaSession {
+  personaId: string;
+  activeThreadId: string | null;
+  anchorMessageId: string | null;
+  headText: string | null;
+  chronicleText: string | null;
+  passphrase: string | null;
+  headUpdatedAt: number | null;
+  metabolismError: string | null;
+  importState: PersonaImportState;
 }
 
 export type MemoryKind = "note";
 
+/** Pre-v2 memo row. Only migration and old file formats still read it; core memories are pages. */
 export interface MemoryEntry {
   id: string;
   personaId: string;
@@ -72,6 +145,8 @@ export interface ProviderConfig {
   apiKey: string;
   baseUrl: string;
   defaultModel: string;
+  /** Model for the Metabolism steps other than the sluice. Blank falls back to defaultModel. */
+  lightModel?: string;
   imageModel: string;
   geminiAutoCache: boolean;
   /** 加算的な任意フィールド (FORMATS.md §6)。未設定は "none" 扱い。 */
@@ -96,7 +171,9 @@ export interface RepositorySnapshot {
   personas: Persona[];
   threads: ConversationThread[];
   messages: ChatMessage[];
-  memories: MemoryEntry[];
+  pages: PageRecord[];
+  fragments: FragmentRecord[];
+  sessions: PersonaSession[];
   providers: ProviderConfig[];
   settings: AppSettings;
 }
@@ -127,6 +204,43 @@ export function isRetiredAutomaticSummary(value: unknown): boolean {
 export function newId(prefix: string): string {
   const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}_${random}`;
+}
+
+type NewChatMessage = Pick<ChatMessage, "id" | "threadId" | "personaId" | "role" | "content" | "createdAt" | "seq">
+  & Partial<ChatMessage>;
+
+export function createChatMessage(fields: NewChatMessage): ChatMessage {
+  return {
+    editedAt: null,
+    scope: "committed",
+    lineRole: "main_line",
+    pulseId: null,
+    pairedActionText: null,
+    metadata: {},
+    source: null,
+    ...fields,
+  };
+}
+
+export const SYSTEM_NOTICE_KEY = "__system_notice__";
+export const HANDY_TOOL_NOTICE = "handy_tool";
+
+/** The stored form of a tool result (body: sea/runtime_llm.py `_store_memory` call). */
+export function handyToolRecord(
+  toolName: string,
+  result: string,
+  metadata: Record<string, unknown> = {},
+): Pick<ChatMessage, "role" | "content" | "metadata"> {
+  const extraTags = Array.isArray(metadata.tags) ? metadata.tags.filter((tag): tag is string => typeof tag === "string") : [];
+  return {
+    role: "system",
+    content: `[Handy Tool: ${toolName}]\n${result}`,
+    metadata: {
+      ...metadata,
+      tags: [...new Set(["conversation", "handy_tool", ...extraTags])],
+      [SYSTEM_NOTICE_KEY]: HANDY_TOOL_NOTICE,
+    },
+  };
 }
 
 export function createDefaultProvider(now = Date.now()): ProviderConfig {

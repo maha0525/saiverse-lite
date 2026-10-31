@@ -1,6 +1,7 @@
 import type { Persona, ProviderConfig, ToolCall, ToolId } from "./domain";
 import type { RetryNotice } from "./llm/retry";
 import type { LlmProvider, ToolDefinition } from "./llm/types";
+import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
 import type { LiteRepository } from "./storage/repository";
 
 export const TOOL_REGISTRY: Record<ToolId, ToolDefinition> = {
@@ -13,6 +14,32 @@ export const TOOL_REGISTRY: Record<ToolId, ToolDefinition> = {
         query: { type: "string", description: "思い出したい内容を表す短い検索語" },
       },
       required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  memory_read: {
+    id: "memory_read",
+    description: "参照を指定して記憶のページを読む。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "読むページの参照 (m:3、c:2、core、ch:5)" },
+      },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  },
+  memory_write: {
+    id: "memory_write",
+    description: "記憶のページに書く。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "書き先の参照 (core、c:2、m:3)" },
+        title: { type: "string", description: "新しいページの題名" },
+        content: { type: "string", description: "書く本文" },
+      },
+      required: ["content"],
       additionalProperties: false,
     },
   },
@@ -78,7 +105,7 @@ export async function executeTool(
   if (call.name === "memory_recall") {
     const query = typeof call.arguments.query === "string" ? call.arguments.query.trim() : "";
     const queryTerms = terms(query);
-    const memories = await repository.listMemories(persona.id);
+    const memories = liveCoreMemories(await repository.listPages(persona.id, CATEGORY_CORE));
     const ranked = memories
       .map((memory) => ({
         memory,
@@ -87,11 +114,12 @@ export async function executeTool(
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)
       .slice(0, 5)
-      .map(({ memory }) => ({ id: memory.id, kind: memory.kind, content: memory.content, updatedAt: memory.updatedAt }));
+      .map(({ memory }) => ({ id: memory.id, kind: memory.metadata.kind, content: memory.content, updatedAt: memory.updatedAt }));
     const content = JSON.stringify({ query, memories: ranked }, null, 2);
     console.log("[SAIVerse Lite][tool] memory_recall complete", { query, hits: ranked.length });
     return { content, metadata: { query, hitCount: ranked.length } };
   }
+  if (call.name !== "image_generate") throw new Error(`まだ実行できないツールです: ${call.name}`);
   const prompt = typeof call.arguments.prompt === "string" ? call.arguments.prompt.trim() : "";
   if (!prompt) throw new Error("画像生成プロンプトが空です");
   const image = await provider.generateImage(prompt, signal, onRetry);

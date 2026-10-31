@@ -15,15 +15,22 @@ import {
   type RepositorySnapshot,
 } from "../domain";
 import {
-  buildCoreMemoryPages,
-  CATEGORY_CORE,
   createPersonaSession,
   createTrunkPages,
   epochSeconds,
   type CoreMemoryDraft,
 } from "../pageRecords";
 import { createV1Stores, upgradeToV2 } from "./migrations";
-import { assertBatchOwner, RowOwnerError, type LiteRepository, type MessageRange, type PersonaRecordBatch } from "./repository";
+import {
+  addCoreMemoriesPlan,
+  assertBatchOwner,
+  RowOwnerError,
+  type LiteRepository,
+  type MessageRange,
+  type PersonaRecordBatch,
+  type PersonaRecordPlan,
+  type PersonaRecordState,
+} from "./repository";
 
 type OwnedKey = [personaId: string, id: string];
 
@@ -91,6 +98,44 @@ async function ensurePersonaRecords(
   if (await sessions.get(personaId)) return;
   for (const page of createTrunkPages(personaId, nowSeconds)) await tx.objectStore("pages").put(page);
   await sessions.put(createPersonaSession(personaId));
+}
+
+type RecordStores = ("threads" | "messages" | "pages" | "fragments" | "sessions")[];
+const RECORD_STORES: RecordStores = ["threads", "messages", "pages", "fragments", "sessions"];
+
+async function readRecordState(tx: WriteTransaction<RecordStores>, personaId: string): Promise<PersonaRecordState> {
+  const pages = await tx.objectStore("pages").getAll(ownerKeys(personaId));
+  const highestPage = await tx.objectStore("pages").index("by-persona-short-id").openKeyCursor(ownerKeys(personaId), "prev");
+  const highestMessage = await tx.objectStore("messages").index("by-persona-seq").openKeyCursor(ownerKeys(personaId), "prev");
+  const session = await tx.objectStore("sessions").get(personaId);
+  return {
+    pages: pages.sort(byCreatedThenId),
+    nextShortId: highestPage ? highestPage.key[1] + 1 : 1,
+    nextMessageSeq: highestMessage ? highestMessage.key[1] + 1 : 1,
+    passphrase: session?.passphrase ?? "",
+  };
+}
+
+async function writeBatch(tx: WriteTransaction<RecordStores>, personaId: string, batch: PersonaRecordBatch): Promise<void> {
+  assertBatchOwner(personaId, batch);
+  const assertOwned = (row: { personaId: string } | undefined): void => {
+    if (row && row.personaId !== personaId) throw new RowOwnerError(row.personaId);
+  };
+  for (const thread of batch.threads ?? []) {
+    assertOwned(await tx.objectStore("threads").get(thread.id));
+    await tx.objectStore("threads").put(thread);
+  }
+  for (const message of batch.messages ?? []) {
+    assertOwned(await tx.objectStore("messages").get(message.id));
+    await tx.objectStore("messages").put(message);
+  }
+  for (const page of batch.pages ?? []) await tx.objectStore("pages").put(page);
+  for (const fragment of batch.fragments ?? []) await tx.objectStore("fragments").put(fragment);
+  if (batch.session) {
+    const current = await tx.objectStore("sessions").get(personaId);
+    if (!current) throw new Error(`Session not found: ${personaId}`);
+    await tx.objectStore("sessions").put(batch.session(current));
+  }
 }
 
 export class IndexedDbRepository implements LiteRepository {
@@ -279,13 +324,7 @@ export class IndexedDbRepository implements LiteRepository {
     return cursor ? cursor.key[1] + 1 : 1;
   }
   async addCoreMemories(personaId: string, drafts: CoreMemoryDraft[]): Promise<PageRecord[]> {
-    const tx = (await this.database()).transaction("pages", "readwrite");
-    const existing = await tx.store.index("by-persona-category").getAll([personaId, CATEGORY_CORE]);
-    const highest = await tx.store.index("by-persona-short-id").openKeyCursor(ownerKeys(personaId), "prev");
-    const written = buildCoreMemoryPages(personaId, existing, highest ? highest.key[1] + 1 : 1, drafts, epochSeconds(Date.now()));
-    for (const page of written) await tx.store.put(page);
-    await tx.done;
-    return written;
+    return this.updatePersonaRecords(personaId, addCoreMemoriesPlan(personaId, drafts));
   }
 
   async listFragments(personaId: string, entityId?: string): Promise<FragmentRecord[]> {
@@ -314,28 +353,11 @@ export class IndexedDbRepository implements LiteRepository {
     return next;
   }
 
-  async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
-    assertBatchOwner(personaId, batch);
-    const tx = (await this.database()).transaction(["threads", "messages", "pages", "fragments", "sessions"], "readwrite");
-    const assertOwned = (row: { personaId: string } | undefined): void => {
-      if (row && row.personaId !== personaId) throw new RowOwnerError(row.personaId);
-    };
+  private async inRecordTransaction<T>(run: (tx: WriteTransaction<RecordStores>) => Promise<T>): Promise<T> {
+    const tx = (await this.database()).transaction(RECORD_STORES, "readwrite");
+    let result: T;
     try {
-      for (const thread of batch.threads ?? []) {
-        assertOwned(await tx.objectStore("threads").get(thread.id));
-        await tx.objectStore("threads").put(thread);
-      }
-      for (const message of batch.messages ?? []) {
-        assertOwned(await tx.objectStore("messages").get(message.id));
-        await tx.objectStore("messages").put(message);
-      }
-      for (const page of batch.pages ?? []) await tx.objectStore("pages").put(page);
-      for (const fragment of batch.fragments ?? []) await tx.objectStore("fragments").put(fragment);
-      if (batch.session) {
-        const current = await tx.objectStore("sessions").get(personaId);
-        if (!current) throw new Error(`Session not found: ${personaId}`);
-        await tx.objectStore("sessions").put(batch.session(current));
-      }
+      result = await run(tx);
     } catch (error) {
       tx.done.catch(() => undefined);
       // A failed request has usually aborted the transaction already, and abort() then throws.
@@ -343,6 +365,19 @@ export class IndexedDbRepository implements LiteRepository {
       throw error;
     }
     await tx.done;
+    return result;
+  }
+
+  async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
+    await this.inRecordTransaction((tx) => writeBatch(tx, personaId, batch));
+  }
+
+  async updatePersonaRecords<T>(personaId: string, plan: (state: PersonaRecordState) => PersonaRecordPlan<T>): Promise<T> {
+    return this.inRecordTransaction(async (tx) => {
+      const { write, result } = plan(await readRecordState(tx, personaId));
+      await writeBatch(tx, personaId, write);
+      return result;
+    });
   }
 
   async listProviders(): Promise<ProviderConfig[]> { return (await (await this.database()).getAll("providers")).sort((a, b) => a.label.localeCompare(b.label)); }

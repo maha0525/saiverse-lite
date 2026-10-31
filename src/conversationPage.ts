@@ -76,6 +76,7 @@ export function noticeSummary(message: ChatMessage): string {
   return message.role === "host" ? "通知" : "システムの記録";
 }
 
+/** A response to replace, or a user row whose turn stopped before one: regenerating continues that turn. */
 export function isRegenerable(message: ChatMessage): boolean {
-  return message.role === "assistant" && message.content.trim() !== "";
+  return message.role === "user" || (message.role === "assistant" && message.content.trim() !== "");
 }

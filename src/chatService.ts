@@ -112,10 +112,11 @@ export class ChatService {
     originalError: unknown,
   ): Promise<ChatOperationError> {
     const { createdIds, durableEffect } = turn;
+    const replacedResponse = removedMessages.length > 0;
     let rollbackError: unknown = null;
     try {
       for (const message of removedMessages) await this.repository.putMessage(message);
-      if (durableEffect) return new ChatOperationError(operation, originalError, true, null, true);
+      if (durableEffect) return new ChatOperationError(operation, originalError, true, null, true, replacedResponse);
       for (const id of createdIds) await this.repository.deleteMessage(id);
       await this.repository.putThread(thread);
       // A page surfaced for a turn that never happened has to surface again when the user resends.
@@ -141,7 +142,7 @@ export class ChatService {
         error,
       });
     }
-    return new ChatOperationError(operation, originalError, rollbackError === null, rollbackError, durableEffect);
+    return new ChatOperationError(operation, originalError, rollbackError === null, rollbackError, durableEffect, replacedResponse);
   }
 
   async send(

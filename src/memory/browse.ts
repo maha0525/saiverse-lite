@@ -76,16 +76,17 @@ export interface PageEdit {
 }
 
 /** Applied to the stored row, not the one on the screen: Metabolism may have written to it since. */
-export async function updateMemopediaPage(
+export function updateMemopediaPage(
   repository: LiteRepository,
   personaId: string,
   pageId: string,
   edit: PageEdit,
 ): Promise<"updated" | "missing" | "title-taken"> {
-  const page = await repository.getPage(personaId, pageId);
-  if (!page || !isMemopediaPage(page)) return "missing";
-  const sameTitle = findPageByTitle(await repository.listPages(personaId), edit.title);
-  if (sameTitle && sameTitle.id !== pageId) return "title-taken";
-  await repository.putPage({ ...page, ...edit, updatedAt: epochSeconds(Date.now()) });
-  return "updated";
+  return repository.updatePersonaRecords<"updated" | "missing" | "title-taken">(personaId, ({ pages }) => {
+    const page = pages.find((item) => item.id === pageId);
+    if (!page || !isMemopediaPage(page)) return { write: {}, result: "missing" };
+    const sameTitle = findPageByTitle(pages, edit.title);
+    if (sameTitle && sameTitle.id !== pageId) return { write: {}, result: "title-taken" };
+    return { write: { pages: [{ ...page, ...edit, updatedAt: epochSeconds(Date.now()) }] }, result: "updated" };
+  });
 }

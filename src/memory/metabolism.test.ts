@@ -5,6 +5,8 @@ import { MockProvider } from "../llm/mock";
 import { ProviderHttpError, StructuredOutputRefusedError, type CompletionRequest, type CompletionResult, type ProviderMessage, type ProviderRequest } from "../llm/types";
 import { CATEGORY_CHRONICLE, CATEGORY_CORE, epochSeconds, liveCoreMemories } from "../pageRecords";
 import { MemoryRepository } from "../storage/memoryRepository";
+import type { PersonaRecordBatch } from "../storage/repository";
+import { replaceCoreMemory } from "./atlas";
 import { composeMessages, realtimeText } from "./conversation";
 import { retryExtractionBacklog } from "./entities";
 import { chronicleEntries, coveredMessageIds } from "./entries";
@@ -84,6 +86,19 @@ function spyProvider(overrides: { complete?: (request: CompletionRequest, calls:
 const isSluice = (request: CompletionRequest): boolean => request.responseSchema !== undefined;
 const isEntity = (request: CompletionRequest): boolean => (request.messages.at(-1)?.content ?? "").includes("固有の対象（エンティティ）");
 const reply = (text: string): Promise<CompletionResult> => Promise.resolve({ text, inputTokens: 1, outputTokens: 1, cachedTokens: 0 });
+
+/** Every batch `repository` writes through a plan. `check` sees each one first, and a throw from it stops that write. */
+function watchPlans(repository: MemoryRepository, check: (batch: PersonaRecordBatch) => void = () => undefined): PersonaRecordBatch[] {
+  const batches: PersonaRecordBatch[] = [];
+  const update = repository.updatePersonaRecords.bind(repository);
+  vi.spyOn(repository, "updatePersonaRecords").mockImplementation(((personaId, plan) => update(personaId, (state) => {
+    const planned = plan(state);
+    check(planned.write);
+    batches.push(planned.write);
+    return planned;
+  })) as MemoryRepository["updatePersonaRecords"]);
+  return batches;
+}
 
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -357,10 +372,10 @@ describe("the sluice and the record of it", () => {
     await f.repository.addCoreMemories(f.persona.id, [{ content: "古い事実" }]);
     await prepareSession(f.repository, f.persona, f.thread.id);
     spyProvider({ complete: adding });
-    const write = vi.spyOn(f.repository, "writePersonaRecords");
+    const batches = watchPlans(f.repository);
     const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
     expect(outcome).toBe("ok");
-    const batch = write.mock.calls.map(([, written]) => written).find((written) => written.messages?.some((message) => message.metadata.__system_notice__ === "sluice_capture"))!;
+    const batch = batches.find((written) => written.messages?.some((message) => message.metadata.__system_notice__ === "sluice_capture"))!;
     expect(batch.pages?.map((page) => page.content).sort()).toEqual(["新しい事実", "直した事実"].sort());
     expect(batch.messages).toHaveLength(1);
     const live = liveCoreMemories(await f.repository.listPages(f.persona.id, CATEGORY_CORE));
@@ -374,16 +389,55 @@ describe("the sluice and the record of it", () => {
     await prepareSession(f.repository, f.persona, f.thread.id);
     const { anchorMessageId } = (await f.repository.getSession(f.persona.id))!;
     spyProvider({ complete: adding });
-    const write = f.repository.writePersonaRecords.bind(f.repository);
-    vi.spyOn(f.repository, "writePersonaRecords").mockImplementation(async (id, batch) => {
+    watchPlans(f.repository, (batch) => {
       if (batch.messages?.length) throw new Error("端末が止まった");
-      await write(id, batch);
     });
     const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
     expect(outcome).toBe("failed");
     expect(liveCoreMemories(await f.repository.listPages(f.persona.id, CATEGORY_CORE)).map((page) => page.content)).toEqual(["古い事実"]);
     expect((await f.repository.listMessages(f.thread.id)).some((message) => message.metadata.__system_notice__ === "sluice_capture")).toBe(false);
     expect((await f.repository.getSession(f.persona.id))?.anchorMessageId).toBe(anchorMessageId);
+  });
+
+  it("leave alone what changed after the model answered, and number past it", async () => {
+    const f = await fixture();
+    await seed(f, 100, 1000);
+    await f.repository.addCoreMemories(f.persona.id, [{ content: "古い事実" }, { content: "消す事実" }]);
+    await prepareSession(f.repository, f.persona, f.thread.id);
+    let answered = false;
+    spyProvider({
+      complete: (request) => {
+        if (!isSluice(request)) return null;
+        answered = true;
+        return reply(JSON.stringify({
+          reflection: "残す",
+          core_adds: [{ content: "新しい事実" }],
+          core_updates: [{ memory_ref: "core:1", content: "スルースの書き換え" }],
+          core_removes: [{ memory_ref: "core:2" }],
+        }));
+      },
+    });
+    // The edit and the memory_write land where the old code had already read the pages.
+    const update = f.repository.updatePersonaRecords.bind(f.repository);
+    vi.spyOn(f.repository, "updatePersonaRecords").mockImplementation((async (personaId, plan) => {
+      if (answered) {
+        answered = false;
+        await replaceCoreMemory(f.repository, f.persona.id, 1, "利用者の編集");
+        await f.repository.addCoreMemories(f.persona.id, [{ content: "会話で書いた事実" }]);
+      }
+      return update(personaId, plan);
+    }) as MemoryRepository["updatePersonaRecords"]);
+    const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
+    expect(outcome).toBe("ok");
+    const live = liveCoreMemories(await f.repository.listPages(f.persona.id, CATEGORY_CORE));
+    expect(live.map((page) => page.content).sort()).toEqual(["利用者の編集", "会話で書いた事実", "新しい事実"].sort());
+    expect(live.map((page) => page.metadata.core_id).sort()).toEqual([1, 3, 4]);
+    const everyShortId = (await f.repository.listPages(f.persona.id)).flatMap((page) => page.shortId ?? []);
+    expect(new Set(everyShortId).size).toBe(everyShortId.length);
+    const record = (await f.repository.listMessages(f.thread.id)).find((message) => message.metadata.__system_notice__ === "sluice_capture")!;
+    expect(record.content).toContain("記憶 core:1 は実行中に変更されたため適用しませんでした。");
+    expect(record.content).toContain("コア記憶 core:4 に採取: 新しい事実");
+    expect(record.scope).toBe("committed");
   });
 
   it("are skipped with a notice when the server refuses structured output", async () => {
@@ -429,7 +483,7 @@ describe("a primary entry and its extraction", () => {
     await seed(f, 100, 1000);
     await prepareSession(f.repository, f.persona, f.thread.id);
     spyProvider();
-    vi.spyOn(f.repository, "writePersonaRecords").mockRejectedValue(new Error("端末が止まった"));
+    watchPlans(f.repository, () => { throw new Error("端末が止まった"); });
     const outcome = await runMetabolism({ repository: f.repository, persona: f.persona, provider: new MockProvider(createDefaultProvider()), chatModel: "mock", lightModel: "mock" });
     expect(outcome).toBe("failed");
     expect(chronicleEntries(await f.repository.listPages(f.persona.id, CATEGORY_CHRONICLE))).toEqual([]);

@@ -10,7 +10,7 @@ import {
   type FragmentRecord,
   type Persona,
 } from "../domain";
-import { CATEGORY_CHRONICLE, CATEGORY_CORE, liveCoreMemories, softDeleteCoreMemory } from "../pageRecords";
+import { buildCoreMemoryPages, CATEGORY_CHRONICLE, CATEGORY_CORE, liveCoreMemories, softDeleteCoreMemory } from "../pageRecords";
 import { IndexedDbRepository } from "./indexedDbRepository";
 import { MemoryRepository } from "./memoryRepository";
 import { RowOwnerError, type LiteRepository } from "./repository";
@@ -286,6 +286,44 @@ const contract: Array<[string, (repository: LiteRepository) => Promise<void>]> =
     ]);
     expect(await repository.getSession(persona.id)).toMatchObject({ headText: "head", metabolismError: "failed" });
     await expect(repository.updateSession("persona_missing", (session) => session)).rejects.toThrow("Session not found");
+  }],
+
+  ["shows a plan the rows as they stand and hands back its result", async (repository) => {
+    const persona = await initialized(repository);
+    const thread = threadOf(persona.id);
+    await repository.writePersonaRecords(persona.id, { threads: [thread], messages: [messageOf(thread, 1, 41)] });
+    await repository.addCoreMemories(persona.id, [{ content: "一" }]);
+    await repository.updateSession(persona.id, (session) => ({ ...session, passphrase: "secret" }));
+    const seen = await repository.updatePersonaRecords(persona.id, (state) => ({
+      write: { messages: [messageOf(thread, 2, state.nextMessageSeq, "planned")] },
+      result: state,
+    }));
+    expect(seen).toMatchObject({ nextShortId: 4, nextMessageSeq: 42, passphrase: "secret" });
+    expect(seen.pages.map((page) => page.id)).toEqual(expect.arrayContaining([...TRUNK_IDS]));
+    expect(await repository.getMessage("planned")).toMatchObject({ seq: 42 });
+    expect((await repository.updatePersonaRecords("persona_nobody", (state) => ({ write: {}, result: state })))).toEqual({ pages: [], nextShortId: 1, nextMessageSeq: 1, passphrase: "" });
+  }],
+
+  ["lets no write in between a plan's read and its write", async (repository) => {
+    const persona = await initialized(repository);
+    const planned = (content: string) => repository.updatePersonaRecords(persona.id, ({ pages, nextShortId }) => ({
+      write: { pages: buildCoreMemoryPages(persona.id, pages, nextShortId, [{ content }], 1) },
+      result: undefined,
+    }));
+    await Promise.all([planned("一"), repository.addCoreMemories(persona.id, [{ content: "二" }]), planned("三"), repository.addCoreMemories(persona.id, [{ content: "四" }])]);
+    const memories = liveCoreMemories(await repository.listPages(persona.id, CATEGORY_CORE));
+    expect(memories.map((page) => page.metadata.core_id).sort()).toEqual([1, 2, 3, 4]);
+    expect(new Set(memories.map((page) => page.shortId)).size).toBe(4);
+  }],
+
+  ["writes nothing when a plan throws or holds a row it may not write", async (repository) => {
+    const persona = await initialized(repository);
+    const thread = threadOf(persona.id);
+    await expect(repository.updatePersonaRecords(persona.id, () => { throw new Error("考え直した"); })).rejects.toThrow("考え直した");
+    await expect(repository.updatePersonaRecords(persona.id, () => ({ write: { threads: [thread, threadOf("persona_other")] }, result: undefined }))).rejects.toThrow("persona_other");
+    expect(await repository.getThread(thread.id)).toBeUndefined();
+    await repository.updatePersonaRecords(persona.id, () => ({ write: { threads: [thread] }, result: undefined }));
+    expect(await repository.getThread(thread.id)).toEqual(thread);
   }],
 
   ["keeps core memories when a thread is deleted", async (repository) => {

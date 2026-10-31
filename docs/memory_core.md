@@ -98,6 +98,7 @@ interface PersonaSession {
 - 既存のデータは消さない。IndexedDB の版を上げて移行する。
 - 手書きメモと取り込んだメモ（`MemoryEntry`）は、ペルソナごとにコア記憶の行へ移す。本体の Claude 取り込みが全体記憶をコア記憶へ入れるのと同じ扱い。移行後に `memories` ストアの行は使わない。
 - `LiteRepository` のインメモリ実装と IndexedDB 実装は同じ契約テストを通す。
+- `core_id` と `shortId` の採番、現在の行との比較とそれに基づく書き込みは `updatePersonaRecords` の一つのトランザクションで行う。Metabolism はチャットの裏で走るので、読んでから書くまでの間に別の書き込みが入りうる。例外はパックの取り込みで、`importing` のペルソナには誰も書かない。
 - 大量のメッセージを扱うので、スレッドの全行を読む API に頼らない。範囲を指定して読む API を足す（送る会話の組み立て、画面の直近 N 件表示）。
 - フルバックアップ（`saiverse_lite_backup_v1`）は版を上げて新しいストアを含める。古いバックアップの復元も通す。
 
@@ -144,7 +145,7 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 `<system pass="合言葉">本文</system>` の role=user にし、本文の `<system` を無害化し、本文の合言葉を伏せる。
 全プロバイダで同じ経路を使う。記録には書かない。head の説明文は `sea/head_pipeline/sections/system_notice.py` の `SYSTEM_NOTICE_TEXT`。
 
-会話の行は `newConversationRow` で作り、現行の合言葉を本文、`pairedActionText`、`metadata` から伏せて保存する。ユーザー入力、assistant、handy_tool、スルースの記録はこの一つの経路を通る。発言の編集は `withoutPassphrase` を通す。保存済みの行は `composeMessages` が送るときにも伏せる。
+会話の行は `newConversationRow` で作り、現行の合言葉を本文、`pairedActionText`、`metadata` から伏せて保存する。ユーザー入力、assistant、handy_tool はこの一つの経路を通る。スルースの記録は書き込みのトランザクションの中で作るので、同じ番号の振り方と伏せ方を `plannedConversationRow` で行う。発言の編集は `withoutPassphrase` を通す。保存済みの行は `composeMessages` が送るときにも伏せる。
 
 ### 送る会話
 
@@ -175,6 +176,7 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 - 最終応答は今回のラウンドの非空の assistant 発話だけ。無ければ失敗として扱う。
 - 応答の途中で `memory_write` が書き込みに成功していたら、失敗してもそのターンの行を消さず、失敗を画面に出す。ツール上限に達したときも同じ。再生成では元の返答も戻して両方を残す。書き込みが無いターンの失敗は巻き戻す。
 - 再生成の対象は最後の user 行より後の応答。読む量に上限を置かない。`pulseId` のある応答はその pulse の行全部、v1 の `pulseId` の無い行は最後の user 行より後の行全部を置き換える。
+- 最後の user 行より後に見える assistant 行が無いときは、再生成は何も消さず、そのターンの応答を続ける。発話せずに `memory_write` を実行して応答が失敗したターンは、この経路で続きを頼める。
 - `memory_recall`: Chronicle、Memopedia、Fragment、メッセージをキーワードで検索する。既存の `terms` の分割を使う。件数の上限はそのままで、メッセージは全文を返す。ページとあらすじは短縮する。
 - `memory_read`: `m:3`、`c:2`、`core`、`ch:5` の参照を読む。参照の文法は本体の `saiverse/references.py` に合わせる。
 - `memory_write`: 本体の `memory_write` スペルと同じ意味にする。コア記憶の新規と上書き、ページの追記と新規作成。
@@ -192,7 +194,7 @@ head と Chronicle は Metabolism と、システムプロンプトの編集の�
 
 - 失敗したら開始位置を進めない。`metabolismError` を設定して画面に出す。次の応答の後にやり直す。
 - 構造化出力が使えないプロバイダではスルースを飛ばして進み、そのことを画面に出す。OpenAI 互換のサーバーが構造化出力の指定に HTTP 400 / 422 / 501 を返したときも、失敗ではなく同じ扱いにする。
-- スルースのコア記憶の操作と機構の記録は `writePersonaRecords` の一つのトランザクションで書く。
+- スルースのコア記憶の操作と機構の記録は `updatePersonaRecords` の一つのトランザクションで書く。見せた本文との比較と番号の採番も同じトランザクションの中で行い、比較で変わっていた操作は適用せず機構の記録に残す。
 - 一次あらすじは抽出待ちの記録（`extractionBacklog`）と同じトランザクションで保存し、抽出の成功で消す。
 - プロンプトの文面は本体からそのまま移す。Lite 用に変えるのは Building と Spell と手帳に触れる箇所だけで、変えた箇所を一覧にして報告する。
 - 同時に走るのはペルソナごとに一つだけ。`navigator.locks` があれば使い、無ければメモリの中の印で止める。

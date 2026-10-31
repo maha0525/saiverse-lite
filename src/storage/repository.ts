@@ -10,7 +10,7 @@ import type {
   ProviderConfig,
   RepositorySnapshot,
 } from "../domain";
-import type { CoreMemoryDraft } from "../pageRecords";
+import { buildCoreMemoryPages, epochSeconds, type CoreMemoryDraft } from "../pageRecords";
 
 /** A walk over messages in (createdAt, seq, id) order. Rows come back in walking order. */
 export interface MessageRange {
@@ -32,6 +32,22 @@ export interface PersonaRecordBatch {
   session?: (session: PersonaSession) => PersonaSession;
 }
 
+/** The persona's rows as one transaction sees them, for a write that depends on them. */
+export interface PersonaRecordState {
+  /** Every page, oldest first. Includes trunks and soft-deleted pages. */
+  pages: PageRecord[];
+  nextShortId: number;
+  nextMessageSeq: number;
+  /** Empty when the session holds none. */
+  passphrase: string;
+}
+
+export interface PersonaRecordPlan<T> {
+  write: PersonaRecordBatch;
+  /** Handed back to the caller once the write has landed. */
+  result: T;
+}
+
 export function assertBatchOwner(personaId: string, batch: PersonaRecordBatch): void {
   const rows = [...(batch.threads ?? []), ...(batch.messages ?? []), ...(batch.pages ?? []), ...(batch.fragments ?? [])];
   const stray = rows.find((row) => row.personaId !== personaId);
@@ -44,6 +60,14 @@ export class RowOwnerError extends Error {
     super("この中の会話は、すでに別のパートナーの会話と重なっているため書き込めません。");
     this.name = "RowOwnerError";
   }
+}
+
+/** The plan behind `addCoreMemories`, the same for every implementation. */
+export function addCoreMemoriesPlan(personaId: string, drafts: CoreMemoryDraft[]) {
+  return ({ pages, nextShortId }: PersonaRecordState): PersonaRecordPlan<PageRecord[]> => {
+    const written = buildCoreMemoryPages(personaId, pages, nextShortId, drafts, epochSeconds(Date.now()));
+    return { write: { pages: written }, result: written };
+  };
 }
 
 export interface LiteRepository {
@@ -96,6 +120,13 @@ export interface LiteRepository {
    * A thread or message that belongs to another persona throws RowOwnerError and nothing is written.
    */
   writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void>;
+  /**
+   * Reads the persona's rows and writes what `plan` decides in one transaction, so no other
+   * write lands between the two. A write that numbers a page or compares against the current
+   * rows goes through here. `plan` runs synchronously; if it throws, nothing is written.
+   * The same refusals as `writePersonaRecords` apply.
+   */
+  updatePersonaRecords<T>(personaId: string, plan: (state: PersonaRecordState) => PersonaRecordPlan<T>): Promise<T>;
 
   listProviders(): Promise<ProviderConfig[]>;
   getProvider(id: string): Promise<ProviderConfig | undefined>;

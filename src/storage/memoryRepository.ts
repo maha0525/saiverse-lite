@@ -15,14 +15,21 @@ import {
   type RepositorySnapshot,
 } from "../domain";
 import {
-  buildCoreMemoryPages,
-  CATEGORY_CORE,
   createPersonaSession,
   createTrunkPages,
   epochSeconds,
   type CoreMemoryDraft,
 } from "../pageRecords";
-import { assertBatchOwner, RowOwnerError, type LiteRepository, type MessageRange, type PersonaRecordBatch } from "./repository";
+import {
+  addCoreMemoriesPlan,
+  assertBatchOwner,
+  RowOwnerError,
+  type LiteRepository,
+  type MessageRange,
+  type PersonaRecordBatch,
+  type PersonaRecordPlan,
+  type PersonaRecordState,
+} from "./repository";
 
 function byUpdatedDesc<T extends { updatedAt: number }>(a: T, b: T): number {
   return b.updatedAt - a.updatedAt;
@@ -134,19 +141,21 @@ export class MemoryRepository implements LiteRepository {
     this.messages.delete(id);
     console.info("[SAIVerse Lite][storage] Message deleted", { messageId: id });
   }
-  async nextMessageSeq(personaId: string): Promise<number> {
+  private highestMessageSeq(personaId: string): number {
     let highest = 0;
     for (const message of this.messages.values()) {
       if (message.personaId === personaId) highest = Math.max(highest, message.seq);
     }
-    return highest + 1;
+    return highest;
   }
+  async nextMessageSeq(personaId: string): Promise<number> { return this.highestMessageSeq(personaId) + 1; }
 
-  async listPages(personaId: string, category?: string): Promise<PageRecord[]> {
+  private pagesOf(personaId: string, category?: string): PageRecord[] {
     return structuredClone([...this.pages.values()]
       .filter((page) => page.personaId === personaId && (category === undefined || page.category === category))
       .sort(byCreatedThenId));
   }
+  async listPages(personaId: string, category?: string): Promise<PageRecord[]> { return this.pagesOf(personaId, category); }
   async getPage(personaId: string, id: string): Promise<PageRecord | undefined> {
     const page = this.pages.get(ownedKey(personaId, id));
     return page ? structuredClone(page) : undefined;
@@ -157,23 +166,16 @@ export class MemoryRepository implements LiteRepository {
   }
   async putPage(value: PageRecord): Promise<void> { this.pages.set(ownedKey(value.personaId, value.id), structuredClone(value)); }
   async deletePage(personaId: string, id: string): Promise<void> { this.pages.delete(ownedKey(personaId, id)); }
-  async nextPageShortId(personaId: string): Promise<number> {
+  private highestPageShortId(personaId: string): number {
     let highest = 0;
     for (const page of this.pages.values()) {
       if (page.personaId === personaId) highest = Math.max(highest, page.shortId ?? 0);
     }
-    return highest + 1;
+    return highest;
   }
+  async nextPageShortId(personaId: string): Promise<number> { return this.highestPageShortId(personaId) + 1; }
   async addCoreMemories(personaId: string, drafts: CoreMemoryDraft[]): Promise<PageRecord[]> {
-    const written = buildCoreMemoryPages(
-      personaId,
-      await this.listPages(personaId, CATEGORY_CORE),
-      await this.nextPageShortId(personaId),
-      drafts,
-      epochSeconds(Date.now()),
-    );
-    for (const page of written) await this.putPage(page);
-    return written;
+    return this.updatePersonaRecords(personaId, addCoreMemoriesPlan(personaId, drafts));
   }
 
   async listFragments(personaId: string, entityId?: string): Promise<FragmentRecord[]> {
@@ -197,7 +199,8 @@ export class MemoryRepository implements LiteRepository {
     return structuredClone(next);
   }
 
-  async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
+  /** Holds no await, which is what makes the transactions below one step each. */
+  private applyBatch(personaId: string, batch: PersonaRecordBatch): void {
     assertBatchOwner(personaId, batch);
     const existing = [
       ...(batch.threads ?? []).map((thread) => this.threads.get(thread.id)),
@@ -207,11 +210,27 @@ export class MemoryRepository implements LiteRepository {
     if (foreign) throw new RowOwnerError(foreign.personaId);
     const session = this.sessions.get(personaId);
     if (batch.session && !session) throw new Error(`Session not found: ${personaId}`);
-    for (const thread of batch.threads ?? []) await this.putThread(thread);
-    for (const message of batch.messages ?? []) await this.putMessage(message);
-    for (const page of batch.pages ?? []) await this.putPage(page);
-    for (const fragment of batch.fragments ?? []) await this.putFragment(fragment);
-    if (batch.session && session) await this.putSession(batch.session(structuredClone(session)));
+    const nextSession = batch.session && session ? batch.session(structuredClone(session)) : null;
+    for (const thread of batch.threads ?? []) this.threads.set(thread.id, structuredClone(thread));
+    for (const message of batch.messages ?? []) this.messages.set(message.id, structuredClone(message));
+    for (const page of batch.pages ?? []) this.pages.set(ownedKey(page.personaId, page.id), structuredClone(page));
+    for (const fragment of batch.fragments ?? []) this.fragments.set(ownedKey(fragment.personaId, fragment.id), structuredClone(fragment));
+    if (nextSession) this.sessions.set(personaId, structuredClone(nextSession));
+  }
+
+  async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
+    this.applyBatch(personaId, batch);
+  }
+
+  async updatePersonaRecords<T>(personaId: string, plan: (state: PersonaRecordState) => PersonaRecordPlan<T>): Promise<T> {
+    const { write, result } = plan({
+      pages: this.pagesOf(personaId),
+      nextShortId: this.highestPageShortId(personaId) + 1,
+      nextMessageSeq: this.highestMessageSeq(personaId) + 1,
+      passphrase: this.sessions.get(personaId)?.passphrase ?? "",
+    });
+    this.applyBatch(personaId, write);
+    return result;
   }
 
   async listProviders(): Promise<ProviderConfig[]> { return [...this.providers.values()].sort((a, b) => a.label.localeCompare(b.label)); }

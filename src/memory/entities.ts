@@ -214,36 +214,37 @@ async function reflectToMemopedia(
   sourceDate: string,
 ): Promise<void> {
   if (entities.length === 0) return;
-  const pages = await repository.listPages(personaId);
   const fragments = await repository.listFragments(personaId);
-  const writtenPages = new Map<string, PageRecord>();
-  const writtenFragments: FragmentRecord[] = [];
-  let nextShortId = await repository.nextPageShortId(personaId);
-  const known = (title: string): PageRecord | undefined => findPageByTitle([...writtenPages.values(), ...pages], title);
-  for (const entity of entities) {
-    const current = known(entity.name);
-    let page: PageRecord;
-    if (current) {
-      page = entity.summary && entity.summary !== current.summary ? { ...current, summary: entity.summary, updatedAt: epochSeconds(Date.now()) } : current;
-    } else {
-      page = memopediaPage(personaId, {
-        parentId: `root_${entity.category}`,
-        title: entity.name,
-        summary: entity.summary,
-        content: "",
-        category: entity.category,
-        shortId: nextShortId,
-      });
-      nextShortId += 1;
+  await repository.updatePersonaRecords(personaId, (state) => {
+    const writtenPages = new Map<string, PageRecord>();
+    const writtenFragments: FragmentRecord[] = [];
+    let { nextShortId } = state;
+    const known = (title: string): PageRecord | undefined => findPageByTitle([...writtenPages.values(), ...state.pages], title);
+    for (const entity of entities) {
+      const current = known(entity.name);
+      let page: PageRecord;
+      if (current) {
+        page = entity.summary && entity.summary !== current.summary ? { ...current, summary: entity.summary, updatedAt: epochSeconds(Date.now()) } : current;
+      } else {
+        page = memopediaPage(personaId, {
+          parentId: `root_${entity.category}`,
+          title: entity.name,
+          summary: entity.summary,
+          content: "",
+          category: entity.category,
+          shortId: nextShortId,
+        });
+        nextShortId += 1;
+      }
+      for (const note of entity.notes) {
+        const exists = [...fragments, ...writtenFragments].some((fragment) => fragment.entityId === page.id
+          && fragment.content === note && fragment.chronicleEntryId === chronicleEntryId);
+        if (!exists) writtenFragments.push(fragmentRecord(personaId, { content: note, entityId: page.id, chronicleEntryId, sourceDate }));
+      }
+      writtenPages.set(page.id, { ...page, lastReferencedAt: epochSeconds(Date.now()) });
     }
-    for (const note of entity.notes) {
-      const exists = [...fragments, ...writtenFragments].some((fragment) => fragment.entityId === page.id
-        && fragment.content === note && fragment.chronicleEntryId === chronicleEntryId);
-      if (!exists) writtenFragments.push(fragmentRecord(personaId, { content: note, entityId: page.id, chronicleEntryId, sourceDate }));
-    }
-    writtenPages.set(page.id, { ...page, lastReferencedAt: epochSeconds(Date.now()) });
-  }
-  await repository.writePersonaRecords(personaId, { pages: [...writtenPages.values()], fragments: writtenFragments });
+    return { write: { pages: [...writtenPages.values()], fragments: writtenFragments }, result: undefined };
+  });
 }
 
 /** body: `make_batch_callback`'s callback. Throws when the extraction did not happen; "nothing to extract" is success. */

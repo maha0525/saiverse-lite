@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createDefaultPersona, type PageRecord } from "../domain";
 import { CATEGORY_CORE, liveCoreMemories } from "../pageRecords";
 import { MemoryRepository } from "../storage/memoryRepository";
-import { readPage, replaceCoreMemory, writePage } from "./atlas";
+import { readPage, removeCoreMemory, replaceCoreMemory, writePage } from "./atlas";
 import { categoryTitle, matchesQuery, memopediaCategories, memopediaTree, searchMemopedia, updateMemopediaPage } from "./browse";
 import { coreMemoryId } from "./head";
 import { memopediaPage } from "./memopedia";
@@ -88,5 +88,28 @@ describe("editing from the memory screen", () => {
     expect(await replaceCoreMemory(repository, persona.id, coreMemoryId(scene), "書き換え")).toBe("scene");
     expect(await readPage(repository, persona.id, `core:${coreMemoryId(scene)}`)).toContain("実際の会話");
     expect(await replaceCoreMemory(repository, persona.id, 999, "x")).toBe("missing");
+  });
+
+  it("removes the stored core memory, not the copy the screen holds", async () => {
+    const { repository, persona } = await setup();
+    const [onScreen] = await repository.addCoreMemories(persona.id, [{ content: "前の本文" }]);
+    await replaceCoreMemory(repository, persona.id, coreMemoryId(onScreen!), "Metabolism の後の本文");
+    expect(await removeCoreMemory(repository, persona.id, coreMemoryId(onScreen!))).toBe(true);
+    expect(await repository.getPage(persona.id, onScreen!.id)).toMatchObject({ content: "Metabolism の後の本文", isDeleted: true });
+    expect(await removeCoreMemory(repository, persona.id, coreMemoryId(onScreen!))).toBe(false);
+  });
+
+  it("numbers everything memory_write and the screen add in one sequence, whatever runs at once", async () => {
+    const { repository, persona } = await setup();
+    const [first, second] = await Promise.all([
+      writePage(repository, persona.id, { title: "鳥", content: "ピヨ" }),
+      writePage(repository, persona.id, { title: "鳥", content: "二重" }),
+      writePage(repository, persona.id, { title: "魚", content: "ギョ" }),
+      writePage(repository, persona.id, { ref: "core", content: "コア" }),
+      repository.addCoreMemories(persona.id, [{ content: "画面から" }]),
+    ]);
+    expect([first.written, second.written]).toEqual([true, false]);
+    const numbers = (await repository.listPages(persona.id)).flatMap((item) => item.shortId ?? []);
+    expect(new Set(numbers).size).toBe(numbers.length);
   });
 });

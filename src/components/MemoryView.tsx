@@ -1,13 +1,13 @@
 import { X } from "lucide-react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useState, type FormEvent } from "react";
 import type { FragmentRecord, PageRecord, Persona } from "../domain";
-import { coreBudgetNote, replaceCoreMemory, writePage } from "../memory/atlas";
+import { coreBudgetNote, removeCoreMemory, replaceCoreMemory, writePage } from "../memory/atlas";
 import { categoryTitle, matchesQuery, memopediaCategories, memopediaCount, memopediaTree, searchMemopedia, updateMemopediaPage } from "../memory/browse";
 import { chronicleEntries, formatTimestamp, type ChronicleEntry } from "../memory/entries";
 import { coreMemoryId } from "../memory/head";
 import { composePageBody, findPageByTitle, isMemopediaPage } from "../memory/memopedia";
 import { loadDraft, saveDraft } from "../onboarding";
-import { epochSeconds, liveCoreMemories, softDeleteCoreMemory } from "../pageRecords";
+import { liveCoreMemories } from "../pageRecords";
 import type { LiteRepository } from "../storage/repository";
 
 type MemoryTab = "core" | "memopedia" | "chronicle";
@@ -103,7 +103,10 @@ function CoreTab({ persona, repository, pages, onChanged, onError }: CoreTabProp
   const remove = async (page: PageRecord) => {
     if (!window.confirm("この記憶を削除しますか？")) return;
     try {
-      await repository.putPage(softDeleteCoreMemory(page, epochSeconds(Date.now())));
+      if (!await removeCoreMemory(repository, persona.id, coreMemoryId(page))) {
+        onError("この記憶は見つかりませんでした。画面を開き直してください。");
+        return;
+      }
       await onChanged();
     } catch (error) {
       console.error("[SAIVerse Lite][memory] core memory could not be deleted", error);

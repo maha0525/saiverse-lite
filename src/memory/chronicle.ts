@@ -2,7 +2,7 @@ import { randomId, type ChatMessage, type PageRecord } from "../domain";
 import type { CompletionRequest, LlmProvider } from "../llm/types";
 import type { RetryNotice } from "../llm/retry";
 import { CATEGORY_CHRONICLE, epochSeconds, ROOT_CHRONICLE_ID } from "../pageRecords";
-import type { LiteRepository } from "../storage/repository";
+import type { LiteRepository, PersonaRecordState } from "../storage/repository";
 import { chronicleEntries, coverageChars, coveredMessageIds, formatTimestamp, type ChronicleEntry } from "./entries";
 import { planRunChunks } from "./eviction";
 import { CHRONICLE_UNIT_CHARS, isChronicleEligible, materialChars, materialText, messageTags } from "./window";
@@ -314,9 +314,9 @@ interface EntryDraft {
 }
 
 /** The page of body: storage.py `create_entry`. Standard keys win over extra metadata, as there. */
-async function draftEntryPage(repository: LiteRepository, personaId: string, pages: PageRecord[], draft: EntryDraft): Promise<PageRecord> {
+function draftEntryPage(personaId: string, state: PersonaRecordState, draft: EntryDraft): PageRecord {
   const now = epochSeconds(Date.now());
-  const shortId = nextChronicleShortId(pages);
+  const shortId = nextChronicleShortId(state.pages);
   return {
     id: randomId(),
     personaId,
@@ -345,7 +345,7 @@ async function draftEntryPage(repository: LiteRepository, personaId: string, pag
     isTrunk: false,
     isImportant: false,
     lastReferencedAt: now,
-    shortId: await repository.nextPageShortId(personaId),
+    shortId: state.nextShortId,
     source: null,
   };
 }
@@ -386,22 +386,27 @@ export async function compileFold(
     const pages = await repository.listPages(personaId, CATEGORY_CHRONICLE);
     const content = await generateTextWithEmptyRetry(llm, buildBatchPrompt(chunk, pages), "あらすじの生成");
     const times = chunk.map((message) => epochSeconds(message.createdAt));
-    const page = await draftEntryPage(repository, personaId, pages, {
-      level: 1,
-      content,
-      sourceIds: chunk.map((message) => message.id),
-      startTime: Math.min(...times),
-      endTime: Math.max(...times),
-      sourceCount: chunk.length,
-      messageCount: chunk.length,
-      extraMetadata: { digest_origin: "batch", coverage_chars: materialChars(chunk), episode_refs: [] },
+    const entryId = await repository.updatePersonaRecords(personaId, (state) => {
+      const page = draftEntryPage(personaId, state, {
+        level: 1,
+        content,
+        sourceIds: chunk.map((message) => message.id),
+        startTime: Math.min(...times),
+        endTime: Math.max(...times),
+        sourceCount: chunk.length,
+        messageCount: chunk.length,
+        extraMetadata: { digest_origin: "batch", coverage_chars: materialChars(chunk), episode_refs: [] },
+      });
+      // Stored as waiting for extraction from the start, so a stop before `onEntry` finishes loses nothing.
+      return {
+        write: {
+          pages: [page],
+          session: (session) => ({ ...session, extractionBacklog: [...(session.extractionBacklog ?? []), { entryId: page.id, attempts: 0 }] }),
+        },
+        result: page.id,
+      };
     });
-    // Stored as waiting for extraction from the start, so a stop before `onEntry` finishes loses nothing.
-    await repository.writePersonaRecords(personaId, {
-      pages: [page],
-      session: (session) => ({ ...session, extractionBacklog: [...(session.extractionBacklog ?? []), { entryId: page.id, attempts: 0 }] }),
-    });
-    await onEntry({ entryId: page.id, messages: chunk });
+    await onEntry({ entryId, messages: chunk });
   }
 }
 
@@ -586,22 +591,24 @@ export async function runBandOverflow(repository: LiteRepository, personaId: str
     }
     const starts = entries.flatMap((entry) => entry.startTime ?? []);
     const ends = entries.flatMap((entry) => entry.endTime ?? []);
-    const parent = await draftEntryPage(repository, personaId, pages, {
-      level: fold.level + 1,
-      content,
-      sourceIds: entries.map((entry) => entry.id),
-      startTime: starts.length > 0 ? Math.min(...starts) : null,
-      endTime: ends.length > 0 ? Math.max(...ends) : null,
-      sourceCount: entries.length,
-      messageCount: entries.reduce((sum, entry) => sum + entry.messageCount, 0),
-      extraMetadata: { digest_origin: "band", coverage_chars: entries.reduce((sum, entry) => sum + coverageChars(entry), 0) },
+    await repository.updatePersonaRecords(personaId, (state) => {
+      const parent = draftEntryPage(personaId, state, {
+        level: fold.level + 1,
+        content,
+        sourceIds: entries.map((entry) => entry.id),
+        startTime: starts.length > 0 ? Math.min(...starts) : null,
+        endTime: ends.length > 0 ? Math.max(...ends) : null,
+        sourceCount: entries.length,
+        messageCount: entries.reduce((sum, entry) => sum + entry.messageCount, 0),
+        extraMetadata: { digest_origin: "band", coverage_chars: entries.reduce((sum, entry) => sum + coverageChars(entry), 0) },
+      });
+      const children = entries.map((entry): PageRecord => ({
+        ...entry.page,
+        parentId: parent.id,
+        metadata: { ...entry.page.metadata, is_consolidated: 1 },
+      }));
+      return { write: { pages: [parent, ...children] }, result: undefined };
     });
-    const children = entries.map((entry): PageRecord => ({
-      ...entry.page,
-      parentId: parent.id,
-      metadata: { ...entry.page.metadata, is_consolidated: 1 },
-    }));
-    await repository.writePersonaRecords(personaId, { pages: [parent, ...children] });
     created += 1;
   }
   return { created, failed: false };

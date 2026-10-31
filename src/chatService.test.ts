@@ -80,6 +80,33 @@ describe("a response that fails after changing the persona's memory", () => {
     expect((await repository.listMessages(thread.id)).map((message) => message.role)).toEqual(["user", "assistant", "system"]);
   });
 
+  it("continues that turn when regenerated, keeping the user row and the tool result", async () => {
+    const { repository, persona, thread } = await conversation();
+    const service = new ChatService(repository);
+    scriptRounds([WRITE_CORE], new Error("通信が切れました"), [{ type: "text", text: "覚えました" }]);
+    await service.send(persona, thread, "覚えて").catch((error: unknown) => error);
+    const kept = await repository.listMessages(thread.id);
+    await service.regenerate(persona, thread.id);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored.slice(0, 2)).toEqual(kept);
+    expect(stored.map((message) => message.role)).toEqual(["user", "system", "assistant"]);
+    expect(stored[2]).toMatchObject({ content: "覚えました", pulseId: kept[0]!.pulseId });
+    expect(liveCoreMemories(await repository.listPages(persona.id, CATEGORY_CORE)).map((page) => page.content)).toEqual(["猫の名前はミケ"]);
+  });
+
+  it("takes back only the new rows when continuing that turn fails too, and says no response existed", async () => {
+    const { repository, persona, thread } = await conversation();
+    const service = new ChatService(repository);
+    scriptRounds([WRITE_CORE], new Error("通信が切れました"), [{ type: "text", text: "途中まで" }, toolCall("memory_read", { ref: "core" })], new Error("また切れました"));
+    await service.send(persona, thread, "覚えて").catch((error: unknown) => error);
+    const kept = await repository.listMessages(thread.id);
+    const failure = await service.regenerate(persona, thread.id).catch((error: unknown) => error);
+    expect(await repository.listMessages(thread.id)).toEqual(kept);
+    expect(failure).toMatchObject({ keptTurn: false, replacedResponse: false, rollbackSucceeded: true });
+    expect(presentChatError(failure, "regenerate").message).toContain("ここまでのやり取りはそのまま残しています");
+    expect(presentChatError(failure, "regenerate").message).not.toContain("元の返答");
+  });
+
   it("rolls back as before when the tools changed nothing", async () => {
     const { repository, persona, thread } = await conversation();
     scriptRounds([toolCall("memory_recall", { query: "猫" })], [toolCall("memory_write", { ref: "c:9", content: "無い記憶" })], new Error("通信が切れました"));

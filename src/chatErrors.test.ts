@@ -11,6 +11,16 @@ describe("a turn that stayed in the history", () => {
     const regenerated = presentChatError(new ChatOperationError("regenerate", failure, true, null, true), "regenerate");
     expect(regenerated.message).toContain("どちらも履歴に残しています");
   });
+
+  it("does not speak of an original response a regeneration never had", () => {
+    const failure = new Error("通信が切れました");
+    const kept = presentChatError(new ChatOperationError("regenerate", failure, true, null, true, false), "regenerate");
+    expect(kept.message).toContain("ここまでのやり取りは履歴に残しています");
+    expect(kept.message).not.toContain("元の返答");
+    const notRolledBack = presentChatError(new ChatOperationError("regenerate", failure, false, new Error("書けない"), false, false), "regenerate");
+    expect(notRolledBack.message).toContain("履歴の巻き戻しに失敗した可能性があります");
+    expect(notRolledBack.message).not.toContain("元の返答");
+  });
 });
 
 describe("chat error presentation", () => {

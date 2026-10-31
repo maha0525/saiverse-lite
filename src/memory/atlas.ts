@@ -1,6 +1,6 @@
 import type { ChatMessage, FragmentRecord, PageRecord } from "../domain";
-import { CATEGORY_CHRONICLE, CATEGORY_CORE, epochSeconds } from "../pageRecords";
-import type { LiteRepository } from "../storage/repository";
+import { CATEGORY_CHRONICLE, CATEGORY_CORE, epochSeconds, softDeleteCoreMemory } from "../pageRecords";
+import type { LiteRepository, PersonaRecordPlan } from "../storage/repository";
 import { chronicleEntries, formatTimestamp, type ChronicleEntry } from "./entries";
 import { coreMemoriesInOrder, coreMemoryId } from "./head";
 import { composePageBody, DEFAULT_MEMOPEDIA_CATEGORY, findPageByTitle, isMemopediaCategory, isMemopediaPage, memopediaPage, MEMOPEDIA_CATEGORIES } from "./memopedia";
@@ -121,6 +121,7 @@ export interface WriteResult {
 
 const wrote = (text: string): WriteResult => ({ text, written: true });
 const refused = (text: string): WriteResult => ({ text, written: false });
+const nothing = <T>(result: T): PersonaRecordPlan<T> => ({ write: {}, result });
 
 async function writeCoreNew(repository: LiteRepository, personaId: string, text: string): Promise<WriteResult> {
   const [page] = await repository.addCoreMemories(personaId, [{ content: text }]);
@@ -129,12 +130,21 @@ async function writeCoreNew(repository: LiteRepository, personaId: string, text:
 }
 
 /** A scene is a copy of a real conversation, so it is never rewritten. */
-export async function replaceCoreMemory(repository: LiteRepository, personaId: string, id: number, text: string): Promise<"replaced" | "scene" | "missing"> {
-  const page = findCorePage(await repository.listPages(personaId, CATEGORY_CORE), id);
-  if (!page) return "missing";
-  if (page.metadata.kind === "scene") return "scene";
-  await repository.putPage({ ...page, content: text, updatedAt: epochSeconds(Date.now()) });
-  return "replaced";
+export function replaceCoreMemory(repository: LiteRepository, personaId: string, id: number, text: string): Promise<"replaced" | "scene" | "missing"> {
+  return repository.updatePersonaRecords<"replaced" | "scene" | "missing">(personaId, ({ pages }) => {
+    const page = findCorePage(pages, id);
+    if (!page) return nothing("missing");
+    if (page.metadata.kind === "scene") return nothing("scene");
+    return { write: { pages: [{ ...page, content: text, updatedAt: epochSeconds(Date.now()) }] }, result: "replaced" };
+  });
+}
+
+/** Applied to the stored row, not the one on the screen: Metabolism may have written to it since. */
+export function removeCoreMemory(repository: LiteRepository, personaId: string, id: number): Promise<boolean> {
+  return repository.updatePersonaRecords(personaId, ({ pages }) => {
+    const page = findCorePage(pages, id);
+    return page ? { write: { pages: [softDeleteCoreMemory(page, epochSeconds(Date.now()))] }, result: true } : nothing(false);
+  });
 }
 
 async function writeCoreUpdate(repository: LiteRepository, personaId: string, key: string, text: string): Promise<WriteResult> {
@@ -147,12 +157,16 @@ async function writeCoreUpdate(repository: LiteRepository, personaId: string, ke
   return wrote(`コア記憶 core:${id} を上書きしました。${note}head への反映は次の記憶整理（Metabolism）からです。`);
 }
 
-async function appendToPage(repository: LiteRepository, personaId: string, key: string, text: string): Promise<WriteResult> {
-  const page = findMemopediaPage(await repository.listPages(personaId), key);
-  if (!page) return refused(`ページが見つかりません: memopedia:${key}`);
-  const content = page.content ? `${page.content}\n\n${text}` : text;
-  await repository.putPage({ ...page, content, updatedAt: epochSeconds(Date.now()) });
-  return wrote(`${memopediaRef(page)}「${page.title}」に追記しました。`);
+function appendToPage(repository: LiteRepository, personaId: string, key: string, text: string): Promise<WriteResult> {
+  return repository.updatePersonaRecords(personaId, ({ pages }) => {
+    const page = findMemopediaPage(pages, key);
+    if (!page) return nothing(refused(`ページが見つかりません: memopedia:${key}`));
+    const content = page.content ? `${page.content}\n\n${text}` : text;
+    return {
+      write: { pages: [{ ...page, content, updatedAt: epochSeconds(Date.now()) }] },
+      result: wrote(`${memopediaRef(page)}「${page.title}」に追記しました。`),
+    };
+  });
 }
 
 async function createPage(repository: LiteRepository, personaId: string, title: string, category: string | undefined, text: string): Promise<WriteResult> {
@@ -160,21 +174,22 @@ async function createPage(repository: LiteRepository, personaId: string, title: 
   if (!isMemopediaCategory(cat)) {
     return refused(`Error: category が不正です: ${JSON.stringify(category)}（有効: ${[...MEMOPEDIA_CATEGORIES].sort().join(", ")}）`);
   }
-  const existing = findPageByTitle(await repository.listPages(personaId), title);
-  if (existing) {
-    const ref = memopediaRef(existing);
-    return refused(`同名のページが既にあります: ${ref}「${existing.title}」。追記するには memory_write の ref に ${ref} を指定してください。`);
-  }
-  const page = memopediaPage(personaId, {
-    parentId: `root_${cat}`,
-    title,
-    summary: "",
-    content: text,
-    category: cat,
-    shortId: await repository.nextPageShortId(personaId),
+  return repository.updatePersonaRecords(personaId, ({ pages, nextShortId }) => {
+    const existing = findPageByTitle(pages, title);
+    if (existing) {
+      const ref = memopediaRef(existing);
+      return nothing(refused(`同名のページが既にあります: ${ref}「${existing.title}」。追記するには memory_write の ref に ${ref} を指定してください。`));
+    }
+    const page = memopediaPage(personaId, {
+      parentId: `root_${cat}`,
+      title,
+      summary: "",
+      content: text,
+      category: cat,
+      shortId: nextShortId,
+    });
+    return { write: { pages: [page] }, result: wrote(`新しいページを作りました: ${memopediaRef(page)}「${title}」（カテゴリ: ${cat}）`) };
   });
-  await repository.putPage(page);
-  return wrote(`新しいページを作りました: ${memopediaRef(page)}「${title}」（カテゴリ: ${cat}）`);
 }
 
 export interface WriteRequest {

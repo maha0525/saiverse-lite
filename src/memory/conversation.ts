@@ -1,14 +1,12 @@
 import { createChatMessage, type ChatMessage, type NewChatMessage } from "../domain";
 import type { ProviderMessage } from "../llm/types";
-import type { LiteRepository } from "../storage/repository";
+import type { LiteRepository, PersonaRecordState } from "../storage/repository";
 import { formatTimestampSeconds } from "./entries";
 import { noticeMessage, redactPassphrase, redactValue } from "./notices";
 
 const WEEKDAY_NAMES = ["日", "月", "火", "水", "木", "金", "土"];
 
-/** What a conversation row saves: the current passphrase is taken out of its text and metadata. `source` is the pack's. */
-export async function withoutPassphrase(repository: LiteRepository, row: ChatMessage): Promise<ChatMessage> {
-  const passphrase = (await repository.getSession(row.personaId))?.passphrase ?? "";
+function redactRow(row: ChatMessage, passphrase: string): ChatMessage {
   if (!passphrase) return row;
   return {
     ...row,
@@ -18,9 +16,19 @@ export async function withoutPassphrase(repository: LiteRepository, row: ChatMes
   };
 }
 
+/** What a conversation row saves: the current passphrase is taken out of its text and metadata. `source` is the pack's. */
+export async function withoutPassphrase(repository: LiteRepository, row: ChatMessage): Promise<ChatMessage> {
+  return redactRow(row, (await repository.getSession(row.personaId))?.passphrase ?? "");
+}
+
 /** The one way a new conversation row is made, whoever writes it: numbered next, and without the passphrase. */
 export async function newConversationRow(repository: LiteRepository, fields: Omit<NewChatMessage, "seq">): Promise<ChatMessage> {
   return withoutPassphrase(repository, createChatMessage({ ...fields, seq: await repository.nextMessageSeq(fields.personaId) }));
+}
+
+/** `newConversationRow` for a plan of `updatePersonaRecords`, where nothing can be awaited. One row per plan. */
+export function plannedConversationRow(state: PersonaRecordState, fields: Omit<NewChatMessage, "seq">): ChatMessage {
+  return redactRow(createChatMessage({ ...fields, seq: state.nextMessageSeq }), state.passphrase);
 }
 
 /** The image items of a row: `metadata.media` of type image, then `metadata.images`, without repeats. */

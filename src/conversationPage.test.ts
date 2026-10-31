@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deleteRowsAfter, hasRowsAfter, MESSAGE_PAGE_ROWS, noticeSummary, readLatestRows, readOlderRows, rowDisplay } from "./conversationPage";
+import { deleteRowsAfter, hasRowsAfter, isRegenerable, MESSAGE_PAGE_ROWS, noticeSummary, readLatestRows, readOlderRows, rowDisplay } from "./conversationPage";
 import { createChatMessage, createDefaultPersona, handyToolRecord, type ChatMessage, type ConversationThread } from "./domain";
 import { MemoryRepository } from "./storage/memoryRepository";
 
@@ -83,6 +83,19 @@ describe("rowDisplay", () => {
   it("does not put rows outside the presented talk among the bubbles", () => {
     expect(rowDisplay(row(1, { lineRole: "sub_line" }))).toBe("notice");
     expect(rowDisplay(row(1, { scope: "discardable" }))).toBe("notice");
+  });
+});
+
+describe("isRegenerable", () => {
+  it("offers a turn that stopped at the user row or a tool result, with no response yet", () => {
+    const rows = [row(0), row(1, handyToolRecord("memory_write", "書きました"))];
+    expect(rows.some(isRegenerable)).toBe(true);
+  });
+
+  it("offers a response, and not a blank row or a notice alone", () => {
+    expect(isRegenerable(row(1))).toBe(true);
+    expect(isRegenerable(row(1, { content: " " }))).toBe(false);
+    expect(isRegenerable(row(1, { role: "system" }))).toBe(false);
   });
 });
 

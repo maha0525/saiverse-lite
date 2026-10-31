@@ -48,6 +48,10 @@ function byId(rows: Row[]): Map<string, Row> {
   return new Map(rows.map((row) => [String(row.id), row]));
 }
 
+function byIdOfUri(rows: Row[]): Map<string, Row> {
+  return new Map(rows.map((row) => [String(row.uri), row]));
+}
+
 const original = () => JSZip.loadAsync(fixture);
 
 async function importFixture(repository: LiteRepository, store: MemoryPackStore): Promise<void> {
@@ -298,6 +302,44 @@ describe("a persona that lived in Lite goes back", () => {
     await importPersonaPack(file, fresh, freshStore, { providerId: "provider_mock", model: "mock-friendly", resolveInitialAnchor: vi.fn(async () => null) });
     const item = ((await fresh.getMessage("message:image"))!.metadata.images as { uri: string }[])[0]!;
     expect(await (await readAttachment(freshStore, personaId, item))!.text()).toBe("png-bytes");
+  });
+
+  it("gives two ids that clean to one name their own files", async () => {
+    const image = (id: string, seq: number, text: string) => createChatMessage({
+      id, threadId: `${personaId}:__persona__`, personaId, createdAt: 1_793_000_000_000, seq,
+      ...handyToolRecord("image_generate", "{\"ok\":true}", { imageDataUrl: `data:image/png;base64,${Buffer.from(text).toString("base64")}` }),
+    });
+    await repository.putMessage(image("message:image", 1000, "first"));
+    await repository.putMessage(image("message_image", 1001, "second"));
+    const { file } = await exported();
+    await validatePack(file);
+    const zip = await zipOf(file);
+    const messages = byId(await rowsIn(zip, MESSAGES));
+    const uriOf = (id: string) => ((messages.get(id)!.metadata as Row).images as { uri: string }[])[0]!.uri;
+    expect(uriOf("message:image")).toBe("saiverse://image/lite_message_image.png");
+    expect(uriOf("message_image")).toBe("saiverse://image/lite_message_image_2.png");
+    expect(await zip.file("attachments/image/lite_message_image.png")!.async("string")).toBe("first");
+    expect(await zip.file("attachments/image/lite_message_image_2.png")!.async("string")).toBe("second");
+    const index = byIdOfUri(await rowsIn(zip, INDEX));
+    expect(index.get(uriOf("message:image"))!.message_ids).toEqual(["message:image"]);
+    expect(index.get(uriOf("message_image"))!.message_ids).toEqual(["message_image"]);
+  });
+
+  it("does not take the name of an attachment in the original ZIP", async () => {
+    const pack = await original();
+    pack.file("attachments/image/lite_message_image.png", "from the body");
+    const fresh = new MemoryRepository();
+    await fresh.initialize();
+    const freshStore = new MemoryPackStore();
+    await importPersonaPack(await pack.generateAsync({ type: "blob" }), fresh, freshStore, { providerId: "provider_mock", model: "mock-friendly", resolveInitialAnchor: vi.fn(async () => null) });
+    await fresh.putMessage(createChatMessage({
+      id: "message_image", threadId: `${personaId}:__persona__`, personaId, createdAt: 1_793_000_000_000, seq: 1000,
+      ...handyToolRecord("image_generate", "{\"ok\":true}", { imageDataUrl: `data:image/png;base64,${Buffer.from("made in lite").toString("base64")}` }),
+    }));
+    const zip = await zipOf((await exportPersonaPack(personaId, fresh, freshStore)).file);
+    expect(await zip.file("attachments/image/lite_message_image.png")!.async("string")).toBe("from the body");
+    expect(await zip.file("attachments/image/lite_message_image_2.png")!.async("string")).toBe("made in lite");
+    expect((byId(await rowsIn(zip, MESSAGES)).get("message_image")!.metadata as Row).images).toEqual([{ uri: "saiverse://image/lite_message_image_2.png", mime_type: "image/png" }]);
   });
 
   it("tells the person about an image it could not carry", async () => {

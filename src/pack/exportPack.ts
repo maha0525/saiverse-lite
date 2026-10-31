@@ -163,6 +163,8 @@ class PackExportRun {
   unsavedImages = 0;
   private readonly images: PendingImage[] = [];
   private readonly declared: Set<string>;
+  /** Lowercased paths: the original ZIP's and this run's. The body's disk may ignore case. */
+  private readonly takenPaths: Set<string>;
 
   constructor(
     private readonly persona: Persona,
@@ -173,6 +175,7 @@ class PackExportRun {
     private readonly onProgress: (progress: PackExportProgress) => void,
   ) {
     this.declared = pack?.manifest.contents ?? new Set();
+    this.takenPaths = new Set(pack?.archive.names.map((name) => name.toLowerCase()));
   }
 
   private get personaId(): string {
@@ -199,6 +202,20 @@ class PackExportRun {
     for (const thread of threads) yield stelisThreadToRow(thread);
   }
 
+  /** Sanitising can give two ids one name, and the original ZIP can hold it already. */
+  private uniqueImageName(messageId: string, mimeType: string): string {
+    let suffix = "";
+    for (let n = 2; ; n += 1) {
+      const name = imageFileName(`lite_${messageId}${suffix}`, mimeType);
+      const path = `attachments/image/${name}`.toLowerCase();
+      if (!this.takenPaths.has(path)) {
+        this.takenPaths.add(path);
+        return name;
+      }
+      suffix = `_${n}`;
+    }
+  }
+
   /** The stored row with its generated image pointing at a file in attachments/ instead. */
   private withStoredImage(message: ChatMessage): ChatMessage {
     const { imageDataUrl, ...metadata } = message.metadata;
@@ -208,7 +225,7 @@ class PackExportRun {
       this.unsavedImages += 1;
       return message;
     }
-    const name = imageFileName(`lite_${message.id}`, mimeType);
+    const name = this.uniqueImageName(message.id, mimeType);
     const uri = `saiverse://image/${name}`;
     this.images.push({ messageId: message.id, uri, path: `attachments/image/${name}`, mimeType });
     const images = Array.isArray(metadata.images) ? metadata.images : [];

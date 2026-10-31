@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 import type { ProviderConfig } from "../domain";
+import { PackError, PackFormatError } from "../pack/format";
 import type { PackImportProgress, PackImportResult, PackImportStage } from "../pack/importPack";
 
 interface PackImportDialogProps {
@@ -22,6 +23,13 @@ const STAGE_LABELS: Record<PackImportStage, string> = {
   finishing: "仕上げています",
 };
 
+/** What the person can do next. The technical reason is in the console. */
+function failureText(failure: unknown): string {
+  if (failure instanceof PackFormatError) return "このファイルは壊れているか、ペルソナまるごとパックではありません。本体でもう一度書き出して、選び直してください。";
+  if (failure instanceof PackError) return failure.message;
+  return "取り込みが止まりました。同じ ZIP をもう一度選ぶと、続きから入ります。";
+}
+
 export function PackImportDialog(props: PackImportDialogProps) {
   const firstProvider = props.providers.find((provider) => provider.id === props.defaultProviderId) ?? props.providers[0];
   const [file, setFile] = useState<File | null>(null);
@@ -40,7 +48,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
       setResult(await props.onImport(file, providerId, model.trim(), setProgress));
     } catch (failure) {
       console.error("[SAIVerse Lite][pack] import failed", failure);
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(failureText(failure));
     } finally {
       setProgress(null);
     }
@@ -63,7 +71,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
           <div className="form-actions import-dialog-actions"><button type="button" className="button" onClick={props.onClose}>閉じる</button></div>
         </> : <>
           {props.interruptedNames.length > 0 && <p className="import-memory-note">{props.interruptedNames.join("、")}の取り込みが途中で止まっています。同じ ZIP を選ぶと最後まで入ります。</p>}
-          <label className="field"><span>本体で書き出したパック（ZIP）</span><input type="file" accept="application/zip,.zip" disabled={running} onChange={(event) => { setFile(event.target.files?.[0] ?? null); setError(""); }} /></label>
+          <label className="field"><span>本体で書き出したペルソナまるごとパック（ZIP）</span><input type="file" accept="application/zip,.zip" disabled={running} onChange={(event) => { setFile(event.target.files?.[0] ?? null); setError(""); }} /></label>
           <div className="field-grid">
             <label className="field"><span>プロバイダ</span><select value={providerId} disabled={running} onChange={(event) => {
               const provider = props.providers.find((item) => item.id === event.target.value);
@@ -76,7 +84,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
             <span>{STAGE_LABELS[progress.stage]}{progress.total ? `（${progress.done} / ${progress.total}）` : ""}</span>
             <progress style={{ width: "100%", accentColor: "var(--accent)" }} {...(progress.total ? { max: progress.total, value: progress.done } : {})} />
           </div>}
-          {error && <div className="notice" role="alert">取り込めませんでした: {error}</div>}
+          {error && <div className="notice" role="alert">{error}</div>}
           <div className="form-actions import-dialog-actions">
             <button type="button" className="button" onClick={() => void start()} disabled={running || !file || !providerId || !model.trim()}>{running ? "取り込み中…" : "取り込む"}</button>
             <button type="button" className="button secondary" onClick={props.onClose} disabled={running}>キャンセル</button>

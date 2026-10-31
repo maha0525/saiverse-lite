@@ -2,7 +2,7 @@
 // Canon: saiverse_memory/persona_pack/json_stream.py in the body. An element is scanned to its
 // end and handed to JSON.parse, so nothing depends on how the writer spaced or broke its lines.
 
-import { PackError } from "./format";
+import { PackFormatError, parseJson } from "./format";
 
 const SPACE = 0x20, TAB = 0x09, LF = 0x0a, CR = 0x0d;
 const QUOTE = 0x22, BACKSLASH = 0x5c, COMMA = 0x2c;
@@ -23,7 +23,7 @@ async function* decodeChunks(source: AsyncIterable<Uint8Array>, name: string): A
     const rest = decoder.decode();
     if (rest) yield rest;
   } catch (error) {
-    if (error instanceof TypeError) throw new PackError(`${name} が UTF-8 として読めません`);
+    if (error instanceof TypeError) throw new PackFormatError(`${name} が UTF-8 として読めません`);
     throw error;
   }
 }
@@ -42,8 +42,8 @@ export async function* iterJsonArray(
   let pos = 0;
   let index = 0;
 
-  const invalid = () => new PackError(`${name} の JSON が壊れています (${index + 1} 番目の要素の付近)`);
-  const tooLarge = () => new PackError(`${name} の ${index + 1} 番目の要素が上限の ${maxElementChars} 文字を超えています`);
+  const invalid = () => new PackFormatError(`${name} の JSON が壊れています (${index + 1} 番目の要素の付近)`);
+  const tooLarge = () => new PackFormatError(`${name} の ${index + 1} 番目の要素が上限の ${maxElementChars} 文字を超えています`);
 
   const nextChunk = async (): Promise<boolean> => {
     const next = await chunks.next();
@@ -115,9 +115,9 @@ export async function* iterJsonArray(
   };
 
   if (!(await nextChunk())) throw invalid();
-  if (text.charCodeAt(0) === 0xfeff) throw new PackError(`${name} の先頭に BOM が付いています`);
+  if (text.charCodeAt(0) === 0xfeff) throw new PackFormatError(`${name} の先頭に BOM が付いています`);
   if (!(await skipSpace())) throw invalid();
-  if (text.charCodeAt(pos) !== OPEN_BRACKET) throw new PackError(`${name} が JSON の配列ではありません`);
+  if (text.charCodeAt(pos) !== OPEN_BRACKET) throw new PackFormatError(`${name} が JSON の配列ではありません`);
   pos += 1;
   if (!(await skipSpace())) throw invalid();
   if (text.charCodeAt(pos) === CLOSE_BRACKET) {
@@ -127,7 +127,7 @@ export async function* iterJsonArray(
       const element = await readElement();
       let value: unknown;
       try {
-        value = JSON.parse(element);
+        value = parseJson(element);
       } catch {
         throw invalid();
       }

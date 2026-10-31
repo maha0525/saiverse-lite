@@ -198,6 +198,13 @@ export class MemoryRepository implements LiteRepository {
     return session ? structuredClone(session) : undefined;
   }
   async putSession(value: PersonaSession): Promise<void> { this.sessions.set(value.personaId, structuredClone(value)); }
+  async updateSession(personaId: string, update: (session: PersonaSession) => PersonaSession): Promise<PersonaSession> {
+    const current = this.sessions.get(personaId);
+    if (!current) throw new Error(`Session not found: ${personaId}`);
+    const next = update(structuredClone(current));
+    this.sessions.set(personaId, structuredClone(next));
+    return structuredClone(next);
+  }
 
   async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
     assertBatchOwner(personaId, batch);

@@ -140,6 +140,10 @@ export interface PersonaSession {
   recallLedger?: Record<string, RecallLedgerItem[]>;
   /** Absent until the first extraction failure. */
   extractionBacklog?: ExtractionBacklogItem[];
+  /** The system prompt `headText` was built from. A different value means the user edited it. */
+  headSystemPrompt?: string;
+  /** What the last Metabolism left undone without failing, for the screen. */
+  metabolismNotice?: string | null;
 }
 
 export type MemoryKind = "note";

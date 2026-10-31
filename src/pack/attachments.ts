@@ -1,7 +1,7 @@
 import { PackArchive } from "./archive";
 import { isObject } from "./format";
 import type { PackStore } from "./packStore";
-import { ATTACHMENT_INDEX_FILE } from "./validate";
+import { ATTACHMENT_INDEX_FILE, readManifest } from "./validate";
 
 /** One item of `metadata.images` / `documents` / `media` on a message row. */
 export interface AttachmentItem {
@@ -27,7 +27,8 @@ function attachmentKey(item: AttachmentItem): string | null {
 async function openAttachments(file: Blob): Promise<Awaited<OpenPack["opened"]>> {
   const archive = await PackArchive.open(file);
   const byRef = new Map<string, { path: string; mimeType: string }>();
-  if (archive.has(ATTACHMENT_INDEX_FILE)) {
+  const { contents } = await readManifest(archive);
+  if (contents.has("attachments") && archive.has(ATTACHMENT_INDEX_FILE)) {
     for await (const entry of archive.jsonArray(ATTACHMENT_INDEX_FILE)) {
       if (!isObject(entry) || typeof entry.ref !== "string" || typeof entry.path !== "string") continue;
       byRef.set(entry.ref, { path: entry.path, mimeType: typeof entry.mime_type === "string" ? entry.mime_type : "" });

@@ -8,15 +8,21 @@ import { fragmentFromRow, messageFromRow, pageFromRow, threadFromRows, type Thre
 import {
   ACTIVE_STATE_FILE,
   FRAGMENTS_FILE,
+  FRAGMENT_REQUIRED,
   MESSAGES_FILE,
   MESSAGE_JSON_COLUMNS,
+  MESSAGE_REQUIRED,
   PAGES_FILE,
   PAGE_JSON_COLUMNS,
+  PAGE_REQUIRED,
   PROFILE_FILE,
   STELIS_THREADS_FILE,
+  STELIS_THREAD_REQUIRED,
   THREADS_FILE,
+  THREAD_REQUIRED,
   checkArchive,
   readManifest,
+  type MessageKey,
   type PackCheck,
   type PackManifest,
 } from "./validate";
@@ -92,7 +98,7 @@ async function readIcon(archive: PackArchive, files: unknown, warnings: string[]
 }
 
 async function readProfile(archive: PackArchive, manifest: PackManifest, warnings: string[]): Promise<ProfileFields> {
-  const profile = archive.has(PROFILE_FILE) ? await archive.jsonDocument(PROFILE_FILE) : null;
+  const profile = manifest.contents.has("profile") && archive.has(PROFILE_FILE) ? await archive.jsonDocument(PROFILE_FILE) : null;
   const ai = isObject(profile) && isObject(profile.ai) ? profile.ai : {};
   return {
     name: decodeText(ai.AINAME) || manifest.personaName || manifest.personaId,
@@ -103,8 +109,8 @@ async function readProfile(archive: PackArchive, manifest: PackManifest, warning
 }
 
 /** body: adapter.py _active_persona_suffix. Only the value is read; a broken file counts as none. */
-async function readActiveThreadSuffix(archive: PackArchive): Promise<string | null> {
-  if (!archive.has(ACTIVE_STATE_FILE)) return null;
+async function readActiveThreadSuffix(archive: PackArchive, manifest: PackManifest): Promise<string | null> {
+  if (!manifest.contents.has("extensions/saiverse") || !archive.has(ACTIVE_STATE_FILE)) return null;
   let state: unknown;
   try {
     state = await archive.jsonDocument(ACTIVE_STATE_FILE);
@@ -148,6 +154,30 @@ async function checkStorage(packStore: PackStore, file: Blob, archive: PackArchi
   }
 }
 
+/**
+ * Messages and threads are stored by their id alone, and the body keeps message ids when it
+ * gives a persona a new persona_id. Writing such a pack would take the rows from the persona
+ * already here, so it is refused before anything is written.
+ */
+async function refuseRowsOfAnotherPersona(repository: LiteRepository, personaId: string, keys: MessageKey[]): Promise<void> {
+  const threadIds = [...new Set(keys.map((key) => key.threadId))];
+  const [messages, threads] = await Promise.all([
+    Promise.all(keys.map((key) => repository.getMessage(key.id))),
+    Promise.all(threadIds.map((id) => repository.getThread(id))),
+  ]);
+  const owner = [...messages, ...threads].find((row) => row && row.personaId !== personaId)?.personaId;
+  if (owner === undefined) return;
+  const name = (await repository.getPersona(owner))?.name ?? owner;
+  throw new PackError(`このパックの会話は、すでにこの端末にいる${name}の会話と重なっています。入れ直すときは、先に${name}を削除してください。`);
+}
+
+function refusalWarnings({ refused }: PackCheck): string[] {
+  const warnings: string[] = [];
+  if (refused.messages) warnings.push(`発言 ${refused.messages}件は記録が壊れていたので、取り込みませんでした。`);
+  if (refused.pages) warnings.push(`記憶のページ ${refused.pages}件は記録が壊れていたので、取り込みませんでした。`);
+  return warnings;
+}
+
 class BatchWriter<Row> {
   private rows: Row[] = [];
   written = 0;
@@ -186,15 +216,15 @@ async function writeRecords(
   const stelisRows = new Map<string, Record<string, unknown>>();
   const spans = new Map<string, ThreadSpan>();
   if (has("chatlog")) {
-    for await (const row of archive.rows(THREADS_FILE, ["id"])) threadRows.set(String(row.id), row);
-    for await (const row of archive.rows(STELIS_THREADS_FILE, ["thread_id"])) stelisRows.set(String(row.thread_id), row);
+    for await (const row of archive.rows(THREADS_FILE, THREAD_REQUIRED)) threadRows.set(String(row.id), row);
+    for await (const row of archive.rows(STELIS_THREADS_FILE, STELIS_THREAD_REQUIRED)) stelisRows.set(String(row.thread_id), row);
   }
 
   const writeBatch = (batch: PersonaRecordBatch) => repository.writePersonaRecords(personaId, batch);
   const messages = new BatchWriter<ChatMessage>((rows) => writeBatch({ messages: rows }), (done) => onProgress({ stage: "messages", done, total: counts.messages }));
   if (has("chatlog")) {
     let ordinal = 0;
-    for await (const row of archive.rows(MESSAGES_FILE, ["id", "thread_id"])) {
+    for await (const row of archive.rows(MESSAGES_FILE, MESSAGE_REQUIRED)) {
       ordinal += 1;
       if (refusedJsonTextColumns(row, MESSAGE_JSON_COLUMNS).length) continue;
       const message = messageFromRow(row, personaId, ordinal);
@@ -219,7 +249,7 @@ async function writeRecords(
   const pageIds = new Set<string>();
   const pages = new BatchWriter<PageRecord>((rows) => writeBatch({ pages: rows }), (done) => onProgress({ stage: "pages", done, total: counts.pages }));
   if (has("knowledge")) {
-    for await (const row of archive.rows(PAGES_FILE, ["id", "category"])) {
+    for await (const row of archive.rows(PAGES_FILE, PAGE_REQUIRED)) {
       if (refusedJsonTextColumns(row, PAGE_JSON_COLUMNS).length) continue;
       const page = pageFromRow(row, personaId);
       pageIds.add(page.id);
@@ -238,7 +268,7 @@ async function writeRecords(
 
   const fragments = new BatchWriter<FragmentRecord>((rows) => writeBatch({ fragments: rows }), (done) => onProgress({ stage: "fragments", done, total: counts.fragments }));
   if (has("extensions/saiverse")) {
-    for await (const row of archive.rows(FRAGMENTS_FILE, ["id", "content", "entity_id", "created_at"])) {
+    for await (const row of archive.rows(FRAGMENTS_FILE, FRAGMENT_REQUIRED)) {
       await fragments.add(fragmentFromRow(row, personaId));
     }
     await fragments.flush();
@@ -272,8 +302,11 @@ export async function importPersonaPack(
     const resuming = existingSession?.importState === "importing";
     if (existingPersona && !resuming) throw new PackError(`${existingPersona.name}はすでにこの端末にいます。入れ直すときは、先にパートナーを削除してください。`);
 
-    const check = await checkArchive(archive, manifest, (done) => onProgress({ stage: "checking", done, total: null }));
-    const warnings = [...check.refused];
+    const check = await checkArchive(archive, manifest, {
+      onRows: (done) => onProgress({ stage: "checking", done, total: null }),
+      onMessageKeys: (keys) => refuseRowsOfAnotherPersona(repository, personaId, keys),
+    });
+    const warnings = refusalWarnings(check);
     const profile = await readProfile(archive, manifest, warnings);
 
     onProgress({ stage: "saving", done: 0, total: null });
@@ -302,7 +335,7 @@ export async function importPersonaPack(
     const written = await writeRecords(archive, repository, personaId, check, nowMs, onProgress);
 
     onProgress({ stage: "finishing", done: 0, total: null });
-    const activeThreadId = chooseActiveThread(personaId, await readActiveThreadSuffix(archive), written.threads);
+    const activeThreadId = chooseActiveThread(personaId, await readActiveThreadSuffix(archive, manifest), written.threads);
     await repository.putSession({ ...session, activeThreadId });
     const anchorMessageId = await options.resolveInitialAnchor(repository, personaId);
     await repository.putSession({ ...session, activeThreadId, anchorMessageId, importState: "ready" });

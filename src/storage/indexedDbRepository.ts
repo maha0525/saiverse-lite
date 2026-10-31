@@ -312,6 +312,19 @@ export class IndexedDbRepository implements LiteRepository {
 
   async getSession(personaId: string): Promise<PersonaSession | undefined> { return (await this.database()).get("sessions", personaId); }
   async putSession(value: PersonaSession): Promise<void> { await (await this.database()).put("sessions", value); }
+  async updateSession(personaId: string, update: (session: PersonaSession) => PersonaSession): Promise<PersonaSession> {
+    const tx = (await this.database()).transaction("sessions", "readwrite");
+    const current = await tx.store.get(personaId);
+    if (!current) {
+      tx.abort();
+      await tx.done.catch(() => undefined);
+      throw new Error(`Session not found: ${personaId}`);
+    }
+    const next = update(current);
+    await tx.store.put(next);
+    await tx.done;
+    return next;
+  }
 
   async writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void> {
     assertBatchOwner(personaId, batch);

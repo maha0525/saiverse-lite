@@ -78,6 +78,8 @@ export interface LiteRepository {
 
   getSession(personaId: string): Promise<PersonaSession | undefined>;
   putSession(value: PersonaSession): Promise<void>;
+  /** Reads and writes in one step, so a response and a background Metabolism cannot overwrite each other. `update` runs synchronously. */
+  updateSession(personaId: string, update: (session: PersonaSession) => PersonaSession): Promise<PersonaSession>;
 
   /** All or nothing. Rows with an existing key are replaced, so a stopped import can run again. */
   writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void>;

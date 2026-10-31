@@ -1,11 +1,11 @@
-import { newId, type ChatMessage, type PageRecord } from "../domain";
+import type { ChatMessage, PageRecord } from "../domain";
 import type { CompletionRequest, LlmProvider } from "../llm/types";
 import type { RetryNotice } from "../llm/retry";
 import { CATEGORY_CHRONICLE, epochSeconds, ROOT_CHRONICLE_ID } from "../pageRecords";
 import type { LiteRepository } from "../storage/repository";
 import { chronicleEntries, coverageChars, coveredMessageIds, formatTimestamp, type ChronicleEntry } from "./entries";
 import { planRunChunks } from "./eviction";
-import { CHRONICLE_UNIT_CHARS, isChronicleEligible, materialChars, materialText, messageTags, isMechanismRow } from "./window";
+import { CHRONICLE_UNIT_CHARS, isChronicleEligible, materialChars, materialText, messageTags } from "./window";
 
 // body: sai_memory/arasuji/{context,bands,executor,generator}.py.
 const DEFAULT_CHRONICLE_CHAR_BUDGET = 20_000;
@@ -26,6 +26,7 @@ export interface AuxiliaryLlm {
   provider: LlmProvider;
   model: string;
   onRetry?: RetryNotice;
+  signal?: AbortSignal;
 }
 
 export function auxiliaryRequest(llm: AuxiliaryLlm, prompt: string): CompletionRequest {
@@ -35,6 +36,7 @@ export function auxiliaryRequest(llm: AuxiliaryLlm, prompt: string): CompletionR
     memoryContext: "",
     messages: [{ role: "user", content: prompt, toolCallId: null, toolName: null, toolCalls: [] }],
     ...(llm.onRetry ? { onRetry: llm.onRetry } : {}),
+    ...(llm.signal ? { signal: llm.signal } : {}),
   };
 }
 
@@ -480,6 +482,12 @@ function firstFold(rows: Map<number, RowItem[]>): { level: number; items: RowIte
   return null;
 }
 
+interface UncompiledHole {
+  count: number;
+  first: number;
+  last: number;
+}
+
 /** body: bands.py `_hole_between`, in closed seconds: rows on either edge are covered and drop out anyway. */
 async function holeBetween(
   repository: LiteRepository,
@@ -488,11 +496,11 @@ async function holeBetween(
   stelis: Set<string>,
   previous: ChronicleEntry,
   next: ChronicleEntry,
-): Promise<{ count: number; first: number; last: number } | null> {
+): Promise<UncompiledHole | null> {
   if (previous.endTime === null || next.startTime === null || next.startTime < previous.endTime) return null;
   const endMs = (next.startTime + 1) * 1000;
   let cursor = { createdAt: previous.endTime * 1000, seq: -1, id: "" };
-  let hole: { count: number; first: number; last: number } | null = null;
+  let hole = null as UncompiledHole | null;
   for (;;) {
     const batch = await repository.readPersonaMessages(personaId, { direction: "forward", limit: 500, start: cursor });
     for (const message of batch) {
@@ -594,7 +602,3 @@ export async function runBandOverflow(repository: LiteRepository, personaId: str
   }
   return { created, failed: false };
 }
-
-// `newId` stays the id source for rows; Chronicle pages use bare UUIDs as the body does.
-export type { ChronicleEntry };
-export { isMechanismRow, newId };

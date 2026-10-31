@@ -2,30 +2,45 @@ import {
   createChatMessage,
   handyToolRecord,
   newId,
-  type AppSettings,
+  withMemoryTools,
   type ChatMessage,
   type ConversationThread,
-  type PageRecord,
   type Persona,
+  type ProviderConfig,
   type ToolCall,
   type ToolId,
 } from "./domain";
 import { ChatOperationError, type ChatOperation } from "./chatErrors";
 import { createProvider } from "./llm";
 import type { RetryAttempt, RetryNotice } from "./llm/retry";
-import type { ProviderMessage } from "./llm/types";
-import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
-import { requiresApiKey } from "./providerDefaults";
+import type { LlmProvider, ProviderMessage } from "./llm/types";
+import { composeMessages, realtimeText } from "./memory/conversation";
+import { runMetabolism, type MetabolismOutcome } from "./memory/metabolism";
+import { presentHead, redactPassphrase, redactProviderMessage } from "./memory/notices";
+import { runAutoRecall } from "./memory/recall";
+import { prepareSession } from "./memory/session";
+import { windowNeedsMetabolism } from "./memory/window";
+import { requiresApiKey, resolveLightModel } from "./providerDefaults";
 import type { LiteRepository } from "./storage/repository";
 import { executeTool, toolDefinitionsFor } from "./tools";
 
 /** "warning" marks a status the user should notice but need not act on. */
 export type ChatStatusTone = "info" | "warning";
 
+export interface MetabolismState {
+  running: boolean;
+  /** What the run is doing now. Empty once it stopped. */
+  text: string;
+  error: string | null;
+  notice: string | null;
+}
+
 export interface ChatCallbacks {
   onDelta?(text: string): void;
   onStatus?(status: string, tone?: ChatStatusTone): void;
   onUserMessageStored?(message: ChatMessage): void;
+  /** Also fires after the response is done: Metabolism runs on behind it. */
+  onMetabolism?(state: MetabolismState): void;
 }
 
 const TOOL_STATUS: Record<ToolId, string> = {
@@ -35,10 +50,9 @@ const TOOL_STATUS: Record<ToolId, string> = {
   image_generate: "画像を生成しています…",
 };
 
-export function systemPromptWithUserIdentity(systemPrompt: string, settings: AppSettings): string {
-  const userName = settings.userName.trim();
-  return userName ? `${systemPrompt}\n\n会話相手であるユーザーの名前は「${userName}」です。` : systemPrompt;
-}
+const MAX_TOOL_ROUNDS = 4;
+/** The rows regenerating looks at to find the last response. */
+const REGENERATE_LOOKBACK = 200;
 
 /**
  * The provider is retrying on its own, so the wait is expected rather than a
@@ -55,55 +69,57 @@ function retryStatusText(providerLabel: string, attempt: RetryAttempt): string {
   return `${providerLabel}${reason}。${wait}（${attempt.attempt}/${attempt.maxAttempts}回目）`;
 }
 
-// Native tool calls live only inside one response; a stored row is plain text.
-function toProviderMessage(message: ChatMessage): ProviderMessage {
-  return {
-    role: message.role === "assistant" ? "assistant" : "user",
-    content: message.content,
-    toolCallId: null,
-    toolName: null,
-    toolCalls: [],
-  };
-}
-
-function memoryContext(memories: PageRecord[]): string {
-  let remaining = 6_000;
-  const selected: string[] = [];
-  for (const memory of memories.slice(0, 16)) {
-    const line = `- [${String(memory.metadata.kind)}] ${memory.content.trim()}`;
-    if (!line.trim() || line.length > remaining) continue;
-    selected.push(line);
-    remaining -= line.length;
-  }
-  return selected.join("\n");
-}
-
 function usageMetadata(inputTokens: number, outputTokens: number, cachedTokens: number): Record<string, unknown> {
   return { inputTokens, outputTokens, cachedTokens };
 }
 
+interface MetabolismRun {
+  persona: Persona;
+  config: ProviderConfig;
+  provider: LlmProvider;
+  callbacks: ChatCallbacks;
+  closeUndersizedTail: boolean;
+  /** Mirrors the stages to `onStatus`, for the run a response is waiting on. */
+  blocksResponse: boolean;
+  signal?: AbortSignal;
+}
+
 export class ChatService {
+  private readonly background = new Map<string, Promise<void>>();
+
   constructor(private readonly repository: LiteRepository) {}
+
+  /** Resolves when the Metabolism left running behind the last response has finished. */
+  async whenSettled(personaId: string): Promise<void> {
+    await this.background.get(personaId);
+  }
 
   private async rollbackConversation(
     operation: ChatOperation,
     thread: ConversationThread,
-    messagesBefore: ChatMessage[],
+    createdIds: string[],
+    removedMessages: ChatMessage[],
     originalError: unknown,
   ): Promise<ChatOperationError> {
     let rollbackError: unknown = null;
     try {
-      const previousIds = new Set(messagesBefore.map((message) => message.id));
-      const currentMessages = await this.repository.listMessages(thread.id);
-      const createdMessages = currentMessages.filter((message) => !previousIds.has(message.id));
-      for (const message of createdMessages) await this.repository.deleteMessage(message.id);
-      for (const message of messagesBefore) await this.repository.putMessage(message);
+      for (const id of createdIds) await this.repository.deleteMessage(id);
+      for (const message of removedMessages) await this.repository.putMessage(message);
       await this.repository.putThread(thread);
+      // A page surfaced for a turn that never happened has to surface again when the user resends.
+      const created = new Set(createdIds);
+      if (await this.repository.getSession(thread.personaId)) {
+        await this.repository.updateSession(thread.personaId, (session) => {
+          const ledger = session.recallLedger?.[thread.id];
+          if (!ledger) return session;
+          return { ...session, recallLedger: { ...session.recallLedger, [thread.id]: ledger.filter((item) => !created.has(item.messageId)) } };
+        });
+      }
       console.info("[SAIVerse Lite][chat] failed operation rolled back", {
         operation,
         threadId: thread.id,
-        removedMessages: createdMessages.length,
-        restoredMessages: messagesBefore.length,
+        removedMessages: createdIds.length,
+        restoredMessages: removedMessages.length,
       });
     } catch (error) {
       rollbackError = error;
@@ -123,26 +139,28 @@ export class ChatService {
     callbacks: ChatCallbacks = {},
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
-    const messagesBefore = await this.repository.listMessages(thread.id);
     const now = Date.now();
     const pulseId = newId("pulse");
-    const userMessage = createChatMessage({
-      id: newId("message"),
-      threadId: thread.id,
-      personaId: persona.id,
-      role: "user",
-      content: content.trim(),
-      createdAt: now,
-      seq: await this.repository.nextMessageSeq(persona.id),
-      pulseId,
-    });
+    const created: string[] = [];
     try {
+      await this.assertNotImporting(persona.id);
+      const userMessage = createChatMessage({
+        id: newId("message"),
+        threadId: thread.id,
+        personaId: persona.id,
+        role: "user",
+        content: content.trim(),
+        createdAt: now,
+        seq: await this.repository.nextMessageSeq(persona.id),
+        pulseId,
+      });
       await this.repository.putMessage(userMessage);
+      created.push(userMessage.id);
       await this.repository.putThread({ ...thread, updatedAt: now, title: thread.title === "新しい会話" ? content.trim().slice(0, 36) || thread.title : thread.title });
       callbacks.onUserMessageStored?.(userMessage);
-      return await this.continueConversation(persona, thread.id, pulseId, callbacks, signal);
+      return await this.continueConversation(persona, thread.id, pulseId, callbacks, created, signal);
     } catch (error) {
-      throw await this.rollbackConversation("send", thread, messagesBefore, error);
+      throw await this.rollbackConversation("send", thread, created, [], error);
     }
   }
 
@@ -154,23 +172,102 @@ export class ChatService {
   ): Promise<ChatMessage> {
     const thread = await this.repository.getThread(threadId);
     if (!thread) throw new Error("会話スレッドが見つかりません");
-    const messages = await this.repository.listMessages(threadId);
-    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+    const created: string[] = [];
+    const removed: ChatMessage[] = [];
     try {
-      if (lastAssistant) await this.repository.deleteMessage(lastAssistant.id);
-      return await this.continueConversation(persona, threadId, newId("pulse"), callbacks, signal);
+      await this.assertNotImporting(persona.id);
+      const recent = await this.repository.readThreadMessages(threadId, { direction: "backward", limit: REGENERATE_LOOKBACK });
+      const last = recent.find((message) => message.role === "assistant");
+      // The tool rows belong to the response being replaced.
+      if (last) removed.push(...(last.pulseId ? recent.filter((message) => message.pulseId === last.pulseId && message.role !== "user") : [last]));
+      for (const message of removed) await this.repository.deleteMessage(message.id);
+      return await this.continueConversation(persona, threadId, last?.pulseId ?? newId("pulse"), callbacks, created, signal);
     } catch (error) {
-      throw await this.rollbackConversation("regenerate", thread, messages, error);
+      throw await this.rollbackConversation("regenerate", thread, created, removed, error);
     }
   }
 
+  private async assertNotImporting(personaId: string): Promise<void> {
+    if ((await this.repository.getSession(personaId))?.importState === "importing") {
+      throw new Error("このペルソナは取り込みの途中です。取り込みが終わると話せます");
+    }
+  }
+
+  private async runMetabolismFor(run: MetabolismRun): Promise<MetabolismOutcome> {
+    const { persona, config, provider, callbacks } = run;
+    let started = false;
+    const onStage = (text: string): void => {
+      started = true;
+      callbacks.onMetabolism?.({ running: true, text, error: null, notice: null });
+      if (run.blocksResponse) callbacks.onStatus?.(text);
+    };
+    const outcome = await runMetabolism({
+      repository: this.repository,
+      persona,
+      provider,
+      chatModel: persona.model || config.defaultModel,
+      lightModel: resolveLightModel(config, persona.model),
+      closeUndersizedTail: run.closeUndersizedTail,
+      onRetry: (attempt) => {
+        const text = retryStatusText(config.label, attempt);
+        callbacks.onMetabolism?.({ running: true, text, error: null, notice: null });
+        if (run.blocksResponse) callbacks.onStatus?.(text, "warning");
+      },
+      onStage,
+      ...(run.signal ? { signal: run.signal } : {}),
+    });
+    if (started || outcome === "failed") {
+      const session = await this.repository.getSession(persona.id);
+      callbacks.onMetabolism?.({ running: false, text: "", error: session?.metabolismError ?? null, notice: session?.metabolismNotice ?? null });
+    }
+    return outcome;
+  }
+
+  /** Runs behind the finished response. A run for the same persona already under way goes first. */
+  private scheduleMetabolism(run: Omit<MetabolismRun, "closeUndersizedTail" | "blocksResponse">): void {
+    const personaId = run.persona.id;
+    const task = (this.background.get(personaId) ?? Promise.resolve())
+      .then(() => this.runMetabolismFor({ ...run, closeUndersizedTail: false, blocksResponse: false }))
+      .then(() => undefined, (error: unknown) => {
+        console.error("[SAIVerse Lite][metabolism] background run failed", { personaId, error });
+      })
+      .finally(() => {
+        if (this.background.get(personaId) === task) this.background.delete(personaId);
+      });
+    this.background.set(personaId, task);
+  }
+
   private async continueConversation(
-    persona: Persona,
+    personaInput: Persona,
     threadId: string,
     pulseId: string,
     callbacks: ChatCallbacks,
+    created: string[],
     signal?: AbortSignal,
   ): Promise<ChatMessage> {
+    const persona = withMemoryTools(personaInput);
+    const config = await this.repository.getProvider(persona.providerId);
+    if (!config) throw new Error("選択されたプロバイダ設定がありません");
+    if (requiresApiKey(config.kind) && !config.apiKey) throw new Error(`${config.label} のAPIキーを設定してください`);
+    const provider = createProvider(config);
+
+    let { session, rows } = await prepareSession(this.repository, persona, threadId);
+    // A run that failed before retries after the response, so a broken provider does not delay every message.
+    let retryAfterResponse = true;
+    if (windowNeedsMetabolism(rows) && !session.metabolismError) {
+      const outcome = await this.runMetabolismFor({
+        persona, config, provider, callbacks, closeUndersizedTail: true, blocksResponse: true, ...(signal ? { signal } : {}),
+      });
+      if (outcome === "ok") ({ session, rows } = await prepareSession(this.repository, persona, threadId));
+      if (outcome === "failed") retryAfterResponse = false;
+    }
+
+    const passphrase = session.passphrase ?? "";
+    const recall = await runAutoRecall(this.repository, session, threadId, rows);
+    const conversation: ProviderMessage[] = composeMessages(rows, passphrase, [realtimeText(new Date()), ...(recall ? [recall] : [])]);
+    const definitions = toolDefinitionsFor(persona, config);
+    const systemPrompt = presentHead(session.headText ?? "", passphrase);
+
     const store = async (fields: Pick<ChatMessage, "role" | "content" | "metadata">): Promise<ChatMessage> => {
       const message = createChatMessage({
         ...fields,
@@ -182,23 +279,13 @@ export class ChatService {
         pulseId,
       });
       await this.repository.putMessage(message);
+      created.push(message.id);
       return message;
     };
-    const config = await this.repository.getProvider(persona.providerId);
-    if (!config) throw new Error("選択されたプロバイダ設定がありません");
-    if (requiresApiKey(config.kind) && !config.apiKey) throw new Error(`${config.label} のAPIキーを設定してください`);
-    const provider = createProvider(config);
-    const settings = await this.repository.getSettings();
-    const definitions = toolDefinitionsFor(persona, config);
-    const memories = liveCoreMemories(await this.repository.listPages(persona.id, CATEGORY_CORE));
-    // A v1 row whose only content was a tool call is empty now, and some providers reject empty turns.
-    const conversation = (await this.repository.listMessages(threadId))
-      .filter((message) => message.role !== "assistant" || message.content.trim() !== "")
-      .slice(-settings.recentContextMessages)
-      .map(toProviderMessage);
-    let finalMessage: ChatMessage | null = null;
 
-    for (let round = 0; round < 4; round += 1) {
+    let lastStored: ChatMessage | null = null;
+    let finalMessage: ChatMessage | null = null;
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const baseStatus = round === 0 ? "応答を待っています…" : "ツールの結果を渡しています…";
       callbacks.onStatus?.(baseStatus);
       let retrying = false;
@@ -214,8 +301,8 @@ export class ChatService {
       let providerState: Record<string, unknown> | null = null;
       for await (const event of provider.stream({
         model: persona.model || config.defaultModel,
-        systemPrompt: systemPromptWithUserIdentity(persona.systemPrompt, settings),
-        memoryContext: memoryContext(memories),
+        systemPrompt,
+        memoryContext: session.chronicleText ?? "",
         messages: conversation,
         tools: definitions,
         toolChoice: "auto",
@@ -241,22 +328,23 @@ export class ChatService {
         }
       }
 
-      const usage = { usage: usageMetadata(inputTokens, outputTokens, cachedTokens) };
+      const metadata = { usage: usageMetadata(inputTokens, outputTokens, cachedTokens) };
+      // An empty assistant row is never kept: some providers reject empty turns.
+      if (text) lastStored = await store({ role: "assistant", content: redactPassphrase(text, passphrase), metadata });
       if (calls.length === 0) {
-        finalMessage = await store({ role: "assistant", content: text, metadata: usage });
+        finalMessage = lastStored;
+        if (!finalMessage) throw new Error("モデルの応答が空でした");
         break;
       }
-      // What the persona said before calling a tool is its speech and is kept.
       // The call itself stays in memory for the rest of this response.
-      if (text) await store({ role: "assistant", content: text, metadata: usage });
-      conversation.push({
+      conversation.push(redactProviderMessage({
         role: "assistant",
         content: text,
         toolCallId: null,
         toolName: null,
         toolCalls: calls,
         ...(providerState ? { providerState } : {}),
-      });
+      }, passphrase));
       for (const call of calls) {
         callbacks.onStatus?.(TOOL_STATUS[call.name]);
         let resultContent: string;
@@ -272,12 +360,13 @@ export class ChatService {
           resultMetadata = { error: true };
           console.error("[SAIVerse Lite][tool] execution failed", { tool: call.name, error });
         }
-        await store(handyToolRecord(call.name, resultContent, resultMetadata));
-        conversation.push({ role: "tool", content: resultContent, toolCallId: call.id, toolName: call.name, toolCalls: [] });
+        lastStored = await store(handyToolRecord(call.name, resultContent, resultMetadata));
+        conversation.push(redactProviderMessage({ role: "tool", content: resultContent, toolCallId: call.id, toolName: call.name, toolCalls: [] }, passphrase));
       }
     }
     if (!finalMessage) throw new Error("ツール呼び出しが上限を超えました");
     callbacks.onStatus?.("");
+    if (retryAfterResponse) this.scheduleMetabolism({ persona, config, provider, callbacks });
     return finalMessage;
   }
 }

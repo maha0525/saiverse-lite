@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatService, systemPromptWithUserIdentity } from "./chatService";
+import { ChatService } from "./chatService";
 import { ChatOperationError } from "./chatErrors";
-import { createChatMessage, createDefaultPersona, DEFAULT_SETTINGS, newId, type ChatMessage, type ConversationThread } from "./domain";
+import { createChatMessage, createDefaultPersona, newId, type ChatMessage, type ConversationThread } from "./domain";
 import { retryDefaults } from "./llm/retry";
 import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
 import { MemoryRepository } from "./storage/memoryRepository";
@@ -215,12 +215,49 @@ describe("ChatService with mock provider", () => {
     });
     await new ChatService(repository).send(persona, thread, "続き");
     vi.restoreAllMocks();
-    expect(seen[0]).toEqual(["続き"]);
+    expect(seen[0]?.at(-1)).toBe("続き");
+    expect(seen[0]?.every((content) => content.trim() !== "")).toBe(true);
   });
 
-  it("adds the configured user name to the system prompt", () => {
-    expect(systemPromptWithUserIdentity("基本の人格", { ...DEFAULT_SETTINGS, userName: "まはー" }))
-      .toBe("基本の人格\n\n会話相手であるユーザーの名前は「まはー」です。");
-    expect(systemPromptWithUserIdentity("基本の人格", DEFAULT_SETTINGS)).toBe("基本の人格");
+  it("does not store an empty assistant row and removes the turn when nothing was said", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "続きの会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    const { MockProvider } = await import("./llm/mock");
+    vi.spyOn(MockProvider.prototype, "stream").mockImplementation(async function* () { await Promise.resolve(); });
+    await expect(new ChatService(repository).send(persona, thread, "もしもし")).rejects.toBeInstanceOf(ChatOperationError);
+    vi.restoreAllMocks();
+    expect(await repository.listMessages(thread.id)).toEqual([]);
+  });
+
+  it("regenerates over the tool rows of the replaced response, keeping the pulse", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    await repository.addCoreMemories(persona.id, [{ content: "猫の名前はミケ" }]);
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "続きの会話", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    const service = new ChatService(repository);
+    await service.send(persona, thread, "猫の名前を思い出して");
+    await service.regenerate(persona, thread.id);
+    const stored = await repository.listMessages(thread.id);
+    expect(stored.map((message) => message.role)).toEqual(["user", "system", "assistant"]);
+    expect(new Set(stored.map((message) => message.pulseId)).size).toBe(1);
+  });
+
+  it("refuses a persona whose import has not finished", async () => {
+    const repository = new MemoryRepository();
+    await repository.initialize();
+    const persona = createDefaultPersona();
+    const now = Date.now();
+    const thread: ConversationThread = { id: newId("thread"), personaId: persona.id, title: "取り込み中", createdAt: now, updatedAt: now };
+    await repository.putThread(thread);
+    await repository.updateSession(persona.id, (session) => ({ ...session, importState: "importing" }));
+    await expect(new ChatService(repository).send(persona, thread, "こんにちは")).rejects.toThrow("取り込みの途中");
+    expect(await repository.listMessages(thread.id)).toEqual([]);
   });
 });

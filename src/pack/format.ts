@@ -12,7 +12,7 @@ export const MAX_JSON_ELEMENT_CHARS = 64 * 1024 * 1024;
 /** body: importer.py MAX_UNCOMPRESSED_BYTES. */
 export const MAX_UNCOMPRESSED_BYTES = 8 * 2 * 1024 * 1024 * 1024;
 
-/** A refusal whose message is shown as it is. */
+/** A refusal whose message tells the person what to do, and is shown as it is. */
 export class PackError extends Error {
   constructor(message: string) {
     super(message);
@@ -20,8 +20,33 @@ export class PackError extends Error {
   }
 }
 
+/** The file is not a pack that can be read. The message names the place, for the log. */
+export class PackFormatError extends PackError {
+  constructor(message: string) {
+    super(message);
+    this.name = "PackFormatError";
+  }
+}
+
 export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const NON_FINITE_MARK = "__persona_pack_non_finite__";
+const NON_FINITE_VALUES = new Map([["NaN", Number.NaN], ["Infinity", Number.POSITIVE_INFINITY], ["-Infinity", Number.NEGATIVE_INFINITY]]);
+
+/** body: json.loads reads NaN, Infinity and -Infinity, and json.dumps writes them. JSON.parse reads neither. */
+export function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    if (!/NaN|Infinity/.test(text)) throw error;
+    const marked = text.replace(/"(?:[^"\\]+|\\.)*"|-?Infinity|NaN/g, (token) => (token.startsWith('"') ? token : `"${NON_FINITE_MARK}${token}"`));
+    return JSON.parse(marked, (_key, value: unknown) => {
+      if (typeof value !== "string" || !value.startsWith(NON_FINITE_MARK)) return value;
+      return NON_FINITE_VALUES.get(value.slice(NON_FINITE_MARK.length)) ?? value;
+    });
+  }
 }
 
 function base64ToBytes(value: string): Uint8Array {
@@ -90,7 +115,7 @@ function isBytesWrapper(value: unknown): value is Record<string, string> {
 function rawTextIsStructured(value: unknown): boolean {
   if (!isObject(value) || Object.keys(value).length !== 1 || typeof value[RAW_TEXT_MARKER] !== "string") return false;
   try {
-    const parsed: unknown = JSON.parse(value[RAW_TEXT_MARKER]);
+    const parsed = parseJson(value[RAW_TEXT_MARKER]);
     return typeof parsed === "object" && parsed !== null;
   } catch (error) {
     return error instanceof RangeError;

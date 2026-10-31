@@ -303,7 +303,7 @@ describe("provider transports", () => {
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
     }]);
     expect(body.input).toEqual([
-      { role: "developer", content: "【長期記憶】\n猫が好き" },
+      { role: "user", content: "猫が好き" },
       { role: "user", content: "思い出して" },
       { type: "reasoning", id: "rs_previous", summary: [], encrypted_content: "previous-encrypted-reasoning" },
       { type: "function_call", id: "fc_previous", call_id: "call_1", name: "memory_recall", arguments: "{\"query\":\"dog\"}" },

@@ -245,6 +245,17 @@ const contract: Array<[string, (repository: LiteRepository) => Promise<void>]> =
     expect(await repository.getSession(persona.id)).toMatchObject({ activeThreadId: null, anchorMessageId: null });
   }],
 
+  ["applies session updates one after another", async (repository) => {
+    const persona = { ...createDefaultPersona(1), id: "persona_session_update" };
+    await repository.putPersona(persona);
+    await Promise.all([
+      repository.updateSession(persona.id, (session) => ({ ...session, headText: "head" })),
+      repository.updateSession(persona.id, (session) => ({ ...session, metabolismError: "failed" })),
+    ]);
+    expect(await repository.getSession(persona.id)).toMatchObject({ headText: "head", metabolismError: "failed" });
+    await expect(repository.updateSession("persona_missing", (session) => session)).rejects.toThrow("Session not found");
+  }],
+
   ["keeps core memories when a thread is deleted", async (repository) => {
     const persona = await initialized(repository);
     const thread = threadOf(persona.id);

@@ -1,12 +1,15 @@
+import "fake-indexeddb/auto";
 import { readFileSync } from "node:fs";
 import JSZip from "jszip";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../domain";
+import { resolveInitialAnchor } from "../memory/window";
+import { IndexedDbRepository } from "../storage/indexedDbRepository";
 import { MemoryRepository } from "../storage/memoryRepository";
 import type { LiteRepository, PersonaRecordBatch } from "../storage/repository";
 import { PackArchive } from "./archive";
 import { readAttachment } from "./attachments";
-import { MAX_UNCOMPRESSED_BYTES, PackError, packTimeToMilliseconds, packTimeToSeconds } from "./format";
+import { MAX_UNCOMPRESSED_BYTES, PackError, PackFormatError, decodeValue, packTimeToMilliseconds, packTimeToSeconds, parseJson } from "./format";
 import { importPersonaPack, type PackImportOptions } from "./importPack";
 import { iterJsonArray } from "./jsonStream";
 import { MemoryPackStore } from "./packStore";
@@ -37,6 +40,25 @@ async function changedPack(change: (zip: JSZip) => void | Promise<void>): Promis
 async function jsonOf(zip: JSZip, name: string): Promise<unknown> {
   return JSON.parse(await zip.file(name)!.async("string")) as unknown;
 }
+
+const MESSAGES = "chatlog/messages.json";
+const FRAGMENTS = "extensions/saiverse/memory_db/memopedia_fragments.json";
+
+async function changeRows(zip: JSZip, name: string, change: (rows: Record<string, unknown>[]) => void): Promise<void> {
+  const rows = await jsonOf(zip, name) as Record<string, unknown>[];
+  change(rows);
+  zip.file(name, JSON.stringify(rows));
+}
+
+async function changeManifest(zip: JSZip, change: (manifest: Record<string, unknown>) => void): Promise<void> {
+  const manifest = await jsonOf(zip, "manifest.json") as Record<string, unknown>;
+  change(manifest);
+  zip.file("manifest.json", JSON.stringify(manifest));
+}
+
+const withoutFolder = (folder: string) => changedPack((zip) => changeManifest(zip, (manifest) => {
+  manifest.contents = (manifest.contents as string[]).filter((item) => item !== folder);
+}));
 
 function options(): PackImportOptions {
   return { providerId: "provider_mock", model: "mock-friendly", resolveInitialAnchor: vi.fn(async () => "m-01") };
@@ -100,8 +122,15 @@ describe("iterJsonArray", () => {
     ["control character in a string", '["a\nb"]'],
     ["mismatched bracket", '[{"a":1]]'],
     ["BOM", "\ufeff[]"],
+    ["NaN with a sign", "[-NaN]"],
+    ["a number glued to NaN", "[1NaN]"],
   ])("refuses %s", async (_name, text) => {
     await expect(readArray(text)).rejects.toBeInstanceOf(PackError);
+  });
+
+  it("reads what json.dumps writes for values JSON has no number for, and leaves strings alone", async () => {
+    expect(await readArray('[NaN,{"a":[Infinity,-Infinity]},"NaN and Infinity"]')).toEqual([Number.NaN, { a: [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY] }, "NaN and Infinity"]);
+    expect(parseJson('{"NaN":"\\"NaN\\"","v":NaN}')).toEqual({ NaN: '"NaN"', v: Number.NaN });
   });
 
   it("refuses bytes that are not UTF-8, also when cut inside a character", async () => {
@@ -130,7 +159,51 @@ describe("pack times", () => {
   });
 });
 
+/** What the database's text of messages.metadata reads as, in the shape decodeValue gives it. */
+function metadataValue(text: unknown): unknown {
+  if (typeof text !== "string") return text;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return typeof parsed === "object" && parsed !== null ? parsed : text;
+  } catch {
+    return text;
+  }
+}
+
 describe("importing the fixture", () => {
+  it("has the kinds of records the import must carry", () => {
+    const levels = expected.pages.flatMap((row) => {
+      if (row.category !== "chronicle" || row.is_trunk === 1) return [];
+      return [(JSON.parse(String(row.metadata)) as { level: number }).level];
+    });
+    expect(levels.sort()).toEqual([1, 1, 2]);
+    expect(expected.pages.filter((row) => row.category === "core" && row.is_trunk === 0).length).toBeGreaterThan(0);
+    expect(expected.pages.filter((row) => row.category === "people" && row.is_trunk === 0).length).toBeGreaterThan(0);
+    expect(expected.fragments.length).toBeGreaterThan(0);
+    expect(expected.threads.length).toBeGreaterThan(1);
+    expect(expected.stelis_threads.length).toBeGreaterThan(0);
+    expect(new Set(expected.messages.map((row) => row.role))).toEqual(new Set(["user", "assistant", "model", "system", "host"]));
+  });
+
+  it("keeps thought_signature to the byte", async () => {
+    await importPersonaPack(packFile(), repository, store, options());
+    const decoded = async (id: string) => decodeValue((await repository.getMessage(id))?.source?.thought_signature);
+    expect(await decoded("m-02")).toEqual(Uint8Array.from({ length: 256 }, (_, index) => index));
+    expect(await decoded("m-03")).toEqual(new Uint8Array([0x00, 0x01, 0xff]));
+  });
+
+  it("stores the same rows in IndexedDB as in memory", async () => {
+    const indexedDb = new IndexedDbRepository();
+    await indexedDb.initialize();
+    const inMemory = await importPersonaPack(packFile(), repository, store, options());
+    expect(await importPersonaPack(packFile(), indexedDb, new MemoryPackStore(), options())).toEqual(inMemory);
+    expect(await allMessages(indexedDb)).toEqual(await allMessages(repository));
+    expect(await indexedDb.listPages(personaId)).toEqual(await repository.listPages(personaId));
+    expect(await indexedDb.listFragments(personaId)).toEqual(await repository.listFragments(personaId));
+    expect(await indexedDb.listThreads(personaId)).toEqual(await repository.listThreads(personaId));
+    expect(await indexedDb.getSession(personaId)).toEqual(await repository.getSession(personaId));
+  });
+
   it("stores every row with the values of the database it was written from", async () => {
     const result = await importPersonaPack(packFile(), repository, store, options());
     expect(result).toMatchObject({
@@ -162,6 +235,8 @@ describe("importing the fixture", () => {
       });
       expect(message.role).toBe(row.role === "model" ? "assistant" : row.role);
       expect(message.source?.role).toBe(row.role);
+      expect(message.source?.seq).toBe(row.seq);
+      expect(decodeValue(message.source?.metadata)).toEqual(metadataValue(row.metadata));
     }
 
     const pages = await repository.listPages(personaId);
@@ -216,6 +291,18 @@ describe("importing the fixture", () => {
     expect((await store.get(personaId))?.size).toBe(fixture.length);
   });
 
+  it("starts the active thread at the oldest row no first-level Chronicle covers, with src/memory/window.ts", async () => {
+    // m-02 is covered by ch-2. Past it the thread has enough to keep, so no older row is added.
+    const pack = await changedPack((zip) => changeRows(zip, MESSAGES, (rows) => { rows.find((row) => row.id === "m-14")!.content = "長".repeat(25_000); }));
+    await importPersonaPack(pack, repository, store, { ...options(), resolveInitialAnchor });
+    expect(await repository.getSession(personaId)).toMatchObject({ activeThreadId: `${personaId}:room_a`, anchorMessageId: "m-11", importState: "ready" });
+  });
+
+  it("adds older rows up to the kept amount, with src/memory/window.ts", async () => {
+    await importPersonaPack(packFile(), repository, store, { ...options(), resolveInitialAnchor });
+    expect(await repository.getSession(personaId)).toMatchObject({ anchorMessageId: "m-02", importState: "ready" });
+  });
+
   it("reports the stages with their totals", async () => {
     const stages: string[] = [];
     let messages = 0;
@@ -239,6 +326,12 @@ describe("the active thread", () => {
     expect((await importPersonaPack(pack, repository, store, options())).activeThreadId).toBe(`${personaId}:__persona__`);
   });
 
+  it("is not read from a folder the manifest does not list", async () => {
+    const result = await importPersonaPack(await withoutFolder("extensions/saiverse"), repository, store, options());
+    expect(result.activeThreadId).toBe(`${personaId}:__persona__`);
+    expect(result.fragments).toBe(0);
+  });
+
   it("is never a Stelis thread", async () => {
     const pack = await changedPack((zip) => { zip.file("extensions/saiverse/persona_dir/active_state.json", '{"active_thread_id":"stelis_1"}'); });
     expect((await importPersonaPack(pack, repository, store, options())).activeThreadId).toBe(`${personaId}:__persona__`);
@@ -253,6 +346,11 @@ describe("attachments", () => {
     const blob = await readAttachment(store, personaId, image!);
     expect(blob?.type).toBe("image/png");
     expect(new Uint8Array(await blob!.arrayBuffer()).subarray(0, 4)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+  });
+
+  it("gives null when the manifest does not list attachments", async () => {
+    await importPersonaPack(await withoutFolder("attachments"), repository, store, options());
+    expect(await readAttachment(store, personaId, { uri: "saiverse://image/pic.png" })).toBeNull();
   });
 
   it("gives null for a file the export could not carry and for an unknown pack", async () => {
@@ -304,6 +402,24 @@ describe("refusing a pack", () => {
       zip.file("attachments/index.json", '[{"ref":"a","path":"attachments/x.png"}]');
     }, "添付のパス"],
     ["a profile without ai", (zip) => { zip.file("profile/profile.json", "{}"); }, "ai"],
+    ["a journal row without its key", (zip) => { zip.file("journal/memos.json", '[{"id":1}]'); }, "activity_id"],
+    ["a task_book row without its key", (zip) => { zip.file("journal/task_book.json", "[{}]"); }, "TASK_ID"],
+    ["broken journal JSON", (zip) => { zip.file("journal/activities.json", "[{"); }, "壊れています"],
+    ["an extensions table that is not rows", (zip) => { zip.file("extensions/saiverse/saiverse_db/persona_task.json", "[1]"); }, "オブジェクト"],
+    ["broken extensions JSON", (zip) => { zip.file("extensions/saiverse/memory_db/pulse_logs.json", "[{"); }, "壊れています"],
+    ["a private room without building", (zip) => { zip.file("items/private_room.json", "{}"); }, "building"],
+    ["a private room with fixtures of the wrong shape", async (zip) => {
+      zip.file("items/private_room.json", JSON.stringify({ ...(await jsonOf(zip, "items/private_room.json") as object), fixtures: null }));
+    }, "fixtures"],
+    ["a fixture without FIXTURE_ID", async (zip) => {
+      zip.file("items/private_room.json", JSON.stringify({ ...(await jsonOf(zip, "items/private_room.json") as object), fixtures: [{}] }));
+    }, "FIXTURE_ID"],
+    ["a private room pointing to no file", async (zip) => {
+      zip.file("items/private_room.json", JSON.stringify({ ...(await jsonOf(zip, "items/private_room.json") as object), files: { IMAGE_PATH: "items/gone.png" } }));
+    }, "無いファイル"],
+    ["items without locations", (zip) => { zip.file("items/items.json", '{"items":[]}'); }, "locations"],
+    ["an item without ITEM_ID", (zip) => { zip.file("items/items.json", '{"items":[{}],"locations":[]}'); }, "ITEM_ID"],
+    ["a location without its owner", (zip) => { zip.file("items/items.json", '{"items":[],"locations":[{"ITEM_ID":"a"}]}'); }, "locations"],
   ];
 
   it.each(refused)("refuses %s before writing anything", async (_name, change, message) => {
@@ -313,9 +429,26 @@ describe("refusing a pack", () => {
     await expectNothingWritten();
   });
 
+  it("tells a broken file from a version this app can be updated for", async () => {
+    await expect(importPersonaPack(await changedPack((zip) => { zip.remove("manifest.json"); }), repository, store, options())).rejects.toBeInstanceOf(PackFormatError);
+    const newer = await changedPack((zip) => changeManifest(zip, (manifest) => { manifest.version = "2.0"; }));
+    const failure = await importPersonaPack(newer, repository, store, options()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(PackError);
+    expect(failure).not.toBeInstanceOf(PackFormatError);
+  });
+
   it("refuses a file that is not a ZIP, and a cut one", async () => {
     await expect(importPersonaPack(new Blob(["not a zip"]), repository, store, options())).rejects.toThrow("ZIP");
     await expect(importPersonaPack(new Blob([fixture.subarray(0, fixture.length - 40)]), repository, store, options())).rejects.toThrow("ZIP");
+    await expectNothingWritten();
+  });
+
+  it("refuses an entry whose bytes do not match its CRC, even when the JSON still parses", async () => {
+    const bytes = new Uint8Array(await (await changedPack(() => undefined)).arrayBuffer());
+    const key = Buffer.from(bytes).indexOf("paired_action_text");
+    expect(key).toBeGreaterThan(0);
+    bytes[key] = "q".charCodeAt(0);
+    await expect(importPersonaPack(new Blob([bytes]), repository, store, options())).rejects.toThrow("読み出せません");
     await expectNothingWritten();
   });
 
@@ -337,18 +470,52 @@ describe("refusing a pack", () => {
   });
 
   it("leaves out a row whose JSON column breaks the export's contract, and says so", async () => {
-    const pack = await changedPack(async (zip) => {
-      const rows = await jsonOf(zip, "chatlog/messages.json") as Record<string, unknown>[];
+    const pack = await changedPack((zip) => changeRows(zip, MESSAGES, (rows) => {
       rows[0]!.metadata = { __raw_text__: '{"images":[]}' };
       rows[1]!.metadata = { __bytes_b64__: "/////w==" };
       rows[2]!.metadata = { __bytes_b64__: btoa('{"tags":[]}') };
-      zip.file("chatlog/messages.json", JSON.stringify(rows));
-    });
+    }));
     const result = await importPersonaPack(pack, repository, store, options());
     expect(result.messages).toBe(expected.messages.length - 2);
-    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings).toEqual([expect.stringContaining("発言 2件")]);
     expect(await repository.getMessage("m-01")).toBeUndefined();
     expect((await repository.getMessage("m-03"))?.metadata).toEqual({ __bytes_b64__: btoa('{"tags":[]}') });
+  });
+
+  it("takes a fragment with no text, as the body does", async () => {
+    const pack = await changedPack((zip) => changeRows(zip, FRAGMENTS, (rows) => { rows[0]!.content = ""; }));
+    expect((await importPersonaPack(pack, repository, store, options())).fragments).toBe(expected.fragments.length);
+  });
+
+  it("takes a row with a value only json.dumps can write", async () => {
+    const pack = await changedPack(async (zip) => {
+      const text = await zip.file(MESSAGES)!.async("string");
+      zip.file(MESSAGES, text.replace('"tags": ["internal"]', '"tags": ["internal"], "score": NaN'));
+    });
+    await importPersonaPack(pack, repository, store, options());
+    expect((await repository.getMessage("m-07"))?.metadata.score).toBeNaN();
+  });
+
+  it("does not read a profile the manifest does not list", async () => {
+    const persona = await importPersonaPack(await withoutFolder("profile"), repository, store, options());
+    expect(persona.personaName).toBe(expected.ai.AINAME);
+    expect(await repository.getPersona(personaId)).toMatchObject({ systemPrompt: "", avatarDataUrl: null });
+  });
+
+  it("does not take the rows of a persona already here under another persona_id", async () => {
+    await importPersonaPack(packFile(), repository, store, options());
+    const otherId = "pack_fixture_city_b";
+    const moved = await changedPack(async (zip) => {
+      await changeManifest(zip, (manifest) => { manifest.persona_id = otherId; });
+      for (const name of ["chatlog/threads.json", "chatlog/stelis_threads.json", MESSAGES]) {
+        zip.file(name, (await zip.file(name)!.async("string")).replaceAll(`${personaId}:`, `${otherId}:`));
+      }
+    });
+    await expect(importPersonaPack(moved, repository, store, options())).rejects.toThrow(`${expected.ai.AINAME}を削除`);
+    expect(await repository.getPersona(otherId)).toBeUndefined();
+    expect(await repository.getSession(otherId)).toBeUndefined();
+    expect(await store.get(otherId)).toBeNull();
+    expect(await allMessages(repository)).toHaveLength(expected.messages.length);
   });
 });
 

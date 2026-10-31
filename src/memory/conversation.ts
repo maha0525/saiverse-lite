@@ -83,6 +83,16 @@ export function realtimeText(now: Date): string {
 
 /** Puts unsaved notices right before the last input. body: `last_input_index`; a tagged notice is a user turn here. */
 export function insertBeforeLastInput(messages: ProviderMessage[], notices: ProviderMessage[]): ProviderMessage[] {
-  const index = messages.findLastIndex((message) => message.role === "user");
-  return index < 0 ? [...messages, ...notices] : [...messages.slice(0, index), ...notices, ...messages.slice(index)];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]!.role === "user") return [...messages.slice(0, index), ...notices, ...messages.slice(index)];
+  }
+  return [...messages, ...notices];
+}
+
+/** The conversation part of a request: time origin, window, then `unsaved` notices before the last input. Nothing here is stored. */
+export function composeMessages(rows: ChatMessage[], passphrase: string, unsaved: string[]): ProviderMessage[] {
+  return insertBeforeLastInput(
+    [...timeOriginNotice(rows, passphrase), ...presentRows(rows, passphrase)],
+    unsaved.map((text) => noticeMessage(text, passphrase)),
+  );
 }

@@ -13,8 +13,8 @@ export interface PackStore {
   unavailableReason(): Promise<string | null>;
   /** Bytes still free for this origin, or null when the browser does not say. */
   freeBytes(): Promise<number | null>;
-  /** A stopped write leaves what was stored before. */
-  put(personaId: string, file: Blob): Promise<void>;
+  /** A stopped write leaves what was stored before. `onBytes` gets the bytes written so far. */
+  put(personaId: string, file: Blob, onBytes?: (written: number) => void): Promise<void>;
   get(personaId: string): Promise<Blob | null>;
   /** Removes the stored ZIP and any work file of the persona. */
   delete(personaId: string): Promise<void>;
@@ -59,11 +59,19 @@ export class OpfsPackStore implements PackStore {
     return quota === undefined ? null : quota - (usage ?? 0);
   }
 
-  async put(personaId: string, file: Blob): Promise<void> {
+  async put(personaId: string, file: Blob, onBytes?: (written: number) => void): Promise<void> {
     const directory = await this.directory();
     const handle = await directory.getFileHandle(packFileName(personaId), { create: true });
     // createWritable writes aside and replaces the file on close; pipeTo aborts it on failure.
-    await file.stream().pipeTo(await handle.createWritable());
+    let written = 0;
+    const counted = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        written += chunk.byteLength;
+        onBytes?.(written);
+        controller.enqueue(chunk);
+      },
+    });
+    await file.stream().pipeThrough(counted).pipeTo(await handle.createWritable());
   }
 
   async get(personaId: string): Promise<Blob | null> {
@@ -130,7 +138,10 @@ export class MemoryPackStore implements PackStore {
 
   async unavailableReason(): Promise<string | null> { return this.reason; }
   async freeBytes(): Promise<number | null> { return this.free; }
-  async put(personaId: string, file: Blob): Promise<void> { this.files.set(personaId, file); }
+  async put(personaId: string, file: Blob, onBytes?: (written: number) => void): Promise<void> {
+    this.files.set(personaId, file);
+    onBytes?.(file.size);
+  }
   async get(personaId: string): Promise<Blob | null> { return this.files.get(personaId) ?? null; }
   async delete(personaId: string): Promise<void> {
     this.files.delete(personaId);

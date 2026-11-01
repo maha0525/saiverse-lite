@@ -23,7 +23,7 @@ import {
 import type { LiteRepository } from "../storage/repository";
 import { ApiKeyGuide } from "./ApiKeyGuide";
 import { LegalModal } from "./LegalModal";
-import { packFailureText, STAGE_LABELS } from "./PackImportDialog";
+import { packFailureText, packProgressText } from "./PackImportDialog";
 
 interface OnboardingWizardProps {
   repository: LiteRepository;
@@ -327,7 +327,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
             <div className="wizard-actions column">
               {fileButton("ペルソナまるごとパックを選ぶ", "application/zip,.zip", (file) => void runPackImport(file))}
             </div>
-            {packProgress && <p className="field-help" role="status">{STAGE_LABELS[packProgress.stage]}{packProgress.total ? `（${packProgress.done} / ${packProgress.total}）` : ""}</p>}
+            {packProgress && <p className="field-help" role="status">{packProgressText(packProgress)}</p>}
             {notice && <p className="notice" role="status">{notice}</p>}
             <div className="wizard-actions">
               <button className="text-button" disabled={busy} onClick={() => setStep("fork")}><ArrowLeft size={14} /> 戻る</button>

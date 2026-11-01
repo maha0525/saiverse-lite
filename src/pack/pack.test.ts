@@ -340,8 +340,37 @@ describe("importing the fixture", () => {
       stages.push(progress.stage);
       if (progress.stage === "messages") { messages = progress.done; expect(progress.total).toBe(expected.messages.length); }
     });
-    expect([...new Set(stages)]).toEqual(["checking", "saving", "messages", "threads", "pages", "fragments", "finishing"]);
+    expect([...new Set(stages)]).toEqual(["saving", "checking", "messages", "threads", "pages", "fragments", "finishing"]);
     expect(messages).toBe(expected.messages.length);
+  });
+
+  it("says how many parts of the pack are left to check", async () => {
+    const seen: [number, number][] = [];
+    await importPersonaPack(packFile(), repository, store, options(), ({ stage, done, total }) => {
+      if (stage === "checking" && total) seen.push([done, total]);
+    });
+    const last = seen.at(-1);
+    expect(seen.length).toBeGreaterThan(3);
+    expect(last?.[0]).toBe(last?.[1]);
+  });
+
+  it("reads the pack from the kept copy, because reads of the chosen file are slow on a phone", async () => {
+    let chosenReads = 0;
+    class ChosenFile extends Blob {
+      override slice(start?: number, end?: number, type?: string): Blob {
+        chosenReads += 1;
+        return super.slice(start, end, type);
+      }
+    }
+    class CopyingStore extends MemoryPackStore {
+      override async put(id: string, file: Blob, onBytes?: (written: number) => void): Promise<void> {
+        await super.put(id, new Blob([await file.arrayBuffer()]), onBytes);
+      }
+    }
+    const copying = new CopyingStore();
+    await importPersonaPack(new ChosenFile([packFile()]), repository, copying, options());
+    expect(await repository.getPersona(personaId)).toBeDefined();
+    expect(chosenReads).toBeLessThan(12);
   });
 });
 

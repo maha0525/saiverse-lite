@@ -105,8 +105,9 @@ interface PersonaSession {
 ## パックの取り込み
 
 - 形式の正典は本体の `saiverse_memory/persona_pack/`（`export.py`、`format.py`、`importer.py`）と `docs/intent/persona_pack.md`。
-- ZIP は `@zip.js/zip.js` で読む。ファイル全体をメモリへ載せない。`File` から範囲読みする。
-- 検査は本体の `validate_pack` と同じ条件を、書き込みの前に通す。パスの安全性、manifest の 4 項目、`contents`、必須キー、JSON 一要素の上限。
+- ZIP は `@zip.js/zip.js` で読む。ファイル全体をメモリへ載せない。範囲読みする。
+- 選ばれたファイルから読むのは目録、manifest、取り込めるかの判定までにする。範囲読みは Android の Chrome では遅く、2026-11-01 の実機では 1 回約 250ms だった（OPFS のファイルは約 3.6ms）。先に OPFS へ保存してから、残りを保存した ZIP から読む。断ったパックの保存は消す。
+- 検査は本体の `validate_pack` と同じ条件を、記録の書き込みの前に通す。パスの安全性、manifest の 4 項目、`contents`、必須キー、JSON 一要素の上限。
 - JSON の配列は一要素ずつ読む。本体の `json_stream.py` と同じ考え方で、空白や改行の形に依存しない。
 - ZIP は OPFS の `packs/<persona_id>.zip` へ保存する。`PackStore` インターフェースを置き、テストはメモリ実装を使う。
 - 取り込むのは次だけ。他は ZIP の中に残す。

@@ -66,6 +66,8 @@ export interface OwnedKeys {
 
 export interface PackCheckHooks {
   onRows?: RowProgress;
+  /** After each part of the pack: `done` of `total` parts are checked. */
+  onStep?: (done: number, total: number) => void;
   /** Sees the id of every thread and message row, some hundreds at a time. A throw refuses the pack. */
   onOwnedKeys?: (keys: OwnedKeys) => Promise<void>;
 }
@@ -193,6 +195,16 @@ export async function checkArchive(archive: PackArchive, manifest: PackManifest,
     if (read % 500 === 0) hooks.onRows?.(read);
   };
   const has = (folder: string) => manifest.contents.has(folder);
+  const checksAttachments = has("attachments") && archive.has(ATTACHMENT_INDEX_FILE);
+  const checksProfile = has("profile") && archive.has(PROFILE_FILE);
+  const extensionTables = has("extensions/saiverse") ? archive.names.filter(extensionTableFolder) : [];
+  const stepsTotal = (has("chatlog") ? 3 : 0) + (has("knowledge") ? 1 : 0) + (has("journal") ? JOURNAL_TABLES.length : 0)
+    + (checksAttachments ? 1 : 0) + (checksProfile ? 1 : 0) + (has("items") ? 1 : 0) + extensionTables.length;
+  let stepsDone = 0;
+  const step = () => {
+    stepsDone += 1;
+    hooks.onStep?.(stepsDone, stepsTotal);
+  };
   if (has("chatlog")) {
     let keys: OwnedKeys = { threadIds: [], messageIds: [] };
     const flushKeys = async (): Promise<void> => {
@@ -207,11 +219,13 @@ export async function checkArchive(archive: PackArchive, manifest: PackManifest,
       await flushFullKeys();
       seen();
     }
+    step();
     for await (const row of archive.rows(STELIS_THREADS_FILE, STELIS_THREAD_REQUIRED)) {
       keys.threadIds.push(String(row.thread_id));
       await flushFullKeys();
       seen();
     }
+    step();
     for await (const row of archive.rows(MESSAGES_FILE, MESSAGE_REQUIRED)) {
       const columns = refusedJsonTextColumns(row, MESSAGE_JSON_COLUMNS);
       if (columns.length) {
@@ -226,6 +240,7 @@ export async function checkArchive(archive: PackArchive, manifest: PackManifest,
       seen();
     }
     await flushKeys();
+    step();
   }
   if (has("knowledge")) {
     for await (const row of archive.rows(PAGES_FILE, PAGE_REQUIRED)) {
@@ -238,24 +253,34 @@ export async function checkArchive(archive: PackArchive, manifest: PackManifest,
       }
       seen();
     }
+    step();
   }
   if (has("journal")) {
     for (const [name, key] of JOURNAL_TABLES) {
       for await (const row of archive.rows(name, [key])) { void row; seen(); }
+      step();
     }
   }
-  if (has("attachments") && archive.has(ATTACHMENT_INDEX_FILE)) await checkAttachmentIndex(archive);
-  if (has("profile") && archive.has(PROFILE_FILE)) await checkProfile(archive);
-  if (has("items")) await checkItems(archive);
-  if (has("extensions/saiverse")) {
-    for (const name of archive.names.filter(extensionTableFolder)) {
-      const isFragments = name === FRAGMENTS_FILE;
-      for await (const row of archive.rows(name, isFragments ? FRAGMENT_REQUIRED : [])) {
-        void row;
-        if (isFragments) counts.fragments += 1;
-        seen();
-      }
+  if (checksAttachments) {
+    await checkAttachmentIndex(archive);
+    step();
+  }
+  if (checksProfile) {
+    await checkProfile(archive);
+    step();
+  }
+  if (has("items")) {
+    await checkItems(archive);
+    step();
+  }
+  for (const name of extensionTables) {
+    const isFragments = name === FRAGMENTS_FILE;
+    for await (const row of archive.rows(name, isFragments ? FRAGMENT_REQUIRED : [])) {
+      void row;
+      if (isFragments) counts.fragments += 1;
+      seen();
     }
+    step();
   }
   return { manifest, counts, refused };
 }

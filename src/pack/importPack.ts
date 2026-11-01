@@ -291,10 +291,11 @@ async function writeRecords(
 }
 
 /**
- * Brings a body persona into Lite: docs/memory_core.md「パックの取り込み」. Nothing is written
- * until the whole pack has passed the checks. The session says `importing` from the first
- * write on, so a stop leaves a persona that cannot be talked to, and choosing the same ZIP
- * again replaces every row by its ID and finishes. One import runs at a time in this origin.
+ * Brings a body persona into Lite: docs/memory_core.md「パックの取り込み」. The ZIP is kept first
+ * and read from there. No record is written until the whole pack has passed the checks, and a
+ * refused pack takes its copy with it. The session says `importing` from the first write on,
+ * so a stop leaves a persona that cannot be talked to, and choosing the same ZIP again replaces
+ * every row by its ID and finishes. One import runs at a time in this origin.
  */
 export async function importPersonaPack(
   file: Blob,
@@ -308,17 +309,16 @@ export async function importPersonaPack(
   return result;
 }
 
-async function runImport(
-  file: Blob,
-  repository: LiteRepository,
-  packStore: PackStore,
-  options: PackImportOptions,
-  onProgress: (progress: PackImportProgress) => void,
-): Promise<PackImportResult> {
-  const unavailable = await packStore.unavailableReason();
-  if (unavailable) throw new PackError(unavailable);
+interface ChosenPack {
+  manifest: PackManifest;
+  existingPersona: Persona | undefined;
+  existingSession: PersonaSession | undefined;
+  resuming: boolean;
+  importFingerprint: string;
+}
 
-  onProgress({ stage: "checking", done: 0, total: null });
+/** What decides whether to keep the chosen file. Reads of it are slow on Android, so no more. */
+async function readChosenPack(file: Blob, repository: LiteRepository, packStore: PackStore): Promise<ChosenPack> {
   const archive = await PackArchive.open(file);
   try {
     const manifest = await readManifest(archive);
@@ -331,22 +331,67 @@ async function runImport(
     if (resuming && existingSession?.importFingerprint !== importFingerprint) {
       throw new PackError(`${existingPersona?.name ?? personaId}の取り込みは別の ZIP で途中まで進んでいます。同じ ZIP を選ぶか、先にパートナーを削除してください。`);
     }
+    if (!resuming) await checkStorage(packStore, file, archive);
+    return { manifest, existingPersona, existingSession, resuming, importFingerprint };
+  } finally {
+    await archive.close().catch((error: unknown) => console.warn("[SAIVerse Lite][pack] ZIP could not be closed", error));
+  }
+}
 
+/** Keeps the ZIP unless a stopped import already did, and returns the kept file. */
+async function keepPack(
+  file: Blob,
+  personaId: string,
+  resuming: boolean,
+  packStore: PackStore,
+  onProgress: (progress: PackImportProgress) => void,
+): Promise<Blob> {
+  const alreadyKept = resuming ? await packStore.get(personaId) : null;
+  if (alreadyKept) return alreadyKept;
+  let percent = 0;
+  await packStore.put(personaId, file, (done) => {
+    const reached = Math.floor(done / file.size * 100);
+    if (reached === percent) return;
+    percent = reached;
+    onProgress({ stage: "saving", done, total: file.size });
+  });
+  const kept = await packStore.get(personaId);
+  if (!kept) throw new Error(`The ZIP of ${personaId} is not where it was just kept`);
+  return kept;
+}
+
+async function runImport(
+  file: Blob,
+  repository: LiteRepository,
+  packStore: PackStore,
+  options: PackImportOptions,
+  onProgress: (progress: PackImportProgress) => void,
+): Promise<PackImportResult> {
+  const unavailable = await packStore.unavailableReason();
+  if (unavailable) throw new PackError(unavailable);
+
+  onProgress({ stage: "saving", done: 0, total: file.size });
+  const { manifest, existingPersona, existingSession, resuming, importFingerprint } = await readChosenPack(file, repository, packStore);
+  const personaId = manifest.personaId;
+  const kept = await keepPack(file, personaId, resuming, packStore, onProgress);
+
+  // Until the session says `importing` the ZIP belongs to no persona, so a refusal removes it.
+  let importing = false;
+  let archive: PackArchive | null = null;
+  try {
+    onProgress({ stage: "checking", done: 0, total: null });
+    archive = await PackArchive.open(kept);
     const check = await checkArchive(archive, manifest, {
-      onRows: (done) => onProgress({ stage: "checking", done, total: null }),
+      onStep: (done, total) => onProgress({ stage: "checking", done, total }),
       onOwnedKeys: (keys) => refuseRowsOfAnotherPersona(repository, personaId, keys),
     });
     const warnings = refusalWarnings(check);
     const profile = await readProfile(archive, manifest, warnings);
 
-    onProgress({ stage: "saving", done: 0, total: null });
-    const stored = resuming ? await packStore.get(personaId) : null;
-    if (!resuming) await checkStorage(packStore, file, archive);
-    if (!stored) await packStore.put(personaId, file);
-
     const nowMs = Date.now();
     // The session comes first: with it in place, putPersona leaves the trunk pages to this import.
     const session: PersonaSession = { ...(existingSession ?? createPersonaSession(personaId)), importState: "importing", importFingerprint };
+    importing = true;
     await repository.putSession(session);
     const persona: Persona = {
       id: personaId,
@@ -378,7 +423,12 @@ async function runImport(
       fragments: written.fragments,
       warnings,
     };
+  } catch (error) {
+    await archive?.close().catch((closeError: unknown) => console.warn("[SAIVerse Lite][pack] ZIP could not be closed", closeError));
+    archive = null;
+    if (!resuming && !importing) await packStore.delete(personaId).catch((deleteError: unknown) => console.warn("[SAIVerse Lite][pack] refused ZIP could not be removed", deleteError));
+    throw error;
   } finally {
-    await archive.close().catch((error: unknown) => console.warn("[SAIVerse Lite][pack] ZIP could not be closed", error));
+    await archive?.close().catch((error: unknown) => console.warn("[SAIVerse Lite][pack] ZIP could not be closed", error));
   }
 }

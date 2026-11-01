@@ -15,15 +15,28 @@ interface PackImportDialogProps {
   onClose(): void;
 }
 
-export const STAGE_LABELS: Record<PackImportStage, string> = {
-  checking: "ZIP を確かめています",
-  saving: "ZIP を端末に保存しています",
+const STAGE_LABELS: Record<PackImportStage, string> = {
+  saving: "ZIP を Lite に保存しています",
+  checking: "ZIP の中身を確かめています",
   messages: "会話を読み込んでいます",
   threads: "会話を読み込んでいます",
   pages: "記憶を読み込んでいます",
   fragments: "記憶を読み込んでいます",
   finishing: "仕上げています",
 };
+
+const STAGE_STEPS: Record<PackImportStage, number> = { saving: 1, checking: 2, messages: 3, threads: 3, pages: 4, fragments: 4, finishing: 5 };
+const LAST_STEP = 5;
+
+function stageDetail({ stage, done, total }: PackImportProgress): string {
+  if (!total) return "";
+  if (stage === "saving") return `（${Math.floor(done / total * 100)}%）`;
+  return `（${done} / ${total}${stage === "checking" ? "項目" : "件"}）`;
+}
+
+export function packProgressText(progress: PackImportProgress): string {
+  return `${STAGE_STEPS[progress.stage]} / ${LAST_STEP} 段階目: ${STAGE_LABELS[progress.stage]}${stageDetail(progress)}`;
+}
 
 /** What the person can do next. The technical reason is in the console. */
 export function packFailureText(failure: unknown): string {
@@ -45,7 +58,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
   const start = async () => {
     if (!file) return;
     setError("");
-    setProgress({ stage: "checking", done: 0, total: null });
+    setProgress({ stage: "saving", done: 0, total: null });
     try {
       setResult(await props.onImport(file, providerId, model.trim(), setProgress));
     } catch (failure) {
@@ -83,7 +96,7 @@ export function PackImportDialog(props: PackImportDialogProps) {
             <label className="field"><span>モデルID</span><input value={model} disabled={running} onChange={(event) => setModel(event.target.value)} /></label>
           </div>
           {progress && <div className="field" role="status">
-            <span>{STAGE_LABELS[progress.stage]}{progress.total ? `（${progress.done} / ${progress.total}）` : ""}</span>
+            <span>{packProgressText(progress)}</span>
             <progress style={{ width: "100%", accentColor: "var(--accent)" }} {...(progress.total ? { max: progress.total, value: progress.done } : {})} />
           </div>}
           {error && <div className="notice" role="alert">{error}</div>}

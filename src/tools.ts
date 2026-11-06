@@ -1,18 +1,47 @@
-import type { Persona, ToolCall, ToolId } from "./domain";
+import type { Persona, ProviderConfig, ToolCall, ToolId } from "./domain";
 import type { RetryNotice } from "./llm/retry";
 import type { LlmProvider, ToolDefinition } from "./llm/types";
+import { AtlasRefError, readPage, searchMemory, writePage } from "./memory/atlas";
+import { MEMOPEDIA_CATEGORIES } from "./memory/memopedia";
 import type { LiteRepository } from "./storage/repository";
 
 export const TOOL_REGISTRY: Record<ToolId, ToolDefinition> = {
   memory_recall: {
     id: "memory_recall",
-    description: "端末内に保存された、このペルソナ自身の長期記憶をキーワードで検索する。",
+    description: "ChronicleとMemopedia、Fragment、過去の会話を横断してキーワードで検索します。取得した参照は memory_read で読めます。",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "思い出したい内容を表す短い検索語" },
       },
       required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  memory_read: {
+    id: "memory_read",
+    description: "記憶の地図帳（Memory Atlas）の1ページをその場で読みます。読んだ内容は会話の流れに残り、時間とともに流れていきます。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "読みたいページの参照（例: m:3 / core / c:2 / ch:5）" },
+      },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  },
+  memory_write: {
+    id: "memory_write",
+    description: "記憶の地図帳（Memory Atlas）のページに書きます。宛先 memopedia:N は Memopedia ページ本文への追記です。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで、system プロンプトに常駐し続けます。宛先 core:N は既存コア記憶の上書きです。ref の代わりに title（と category）を指定すると、Memopedia に新しいページを作ります。ref と title はどちらか一方だけ指定してください。Chronicle（chronicle:N）には書けません（時間の地図の編纂はシステムが行います）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "書き先の参照（m:3 = 追記 / core = コア記憶新規 / c:2 = コア記憶上書き）。title とは排他" },
+        content: { type: "string", description: "書きたい本文" },
+        title: { type: "string", description: "新しく作るページの題名。ref とは排他" },
+        category: { type: "string", enum: [...MEMOPEDIA_CATEGORIES], description: "新規ページのカテゴリ（title 指定時のみ。既定: terms）" },
+      },
+      required: ["content"],
       additionalProperties: false,
     },
   },
@@ -30,25 +59,44 @@ export const TOOL_REGISTRY: Record<ToolId, ToolDefinition> = {
   },
 };
 
-export function toolDefinitionsFor(persona: Persona): ToolDefinition[] {
-  return persona.toolIds.map((id) => TOOL_REGISTRY[id]);
+/**
+ * A tool the provider cannot perform must not be offered to the model.
+ *
+ * `image_generate` calls `provider.generateImage()`, which needs an image model
+ * to call - a provider without one (Anthropic, and every on-device model) can
+ * only fail. Offering it anyway costs a wasted tool round every time the model
+ * takes the bait, and the persona has to explain an error it was set up to hit.
+ *
+ * `providerDefaults.ts` has claimed since the model table was introduced that a
+ * blank image model "disables the tool". Nothing implemented that; this does.
+ */
+export function toolDefinitionsFor(persona: Persona, provider: ProviderConfig): ToolDefinition[] {
+  const canGenerateImages = provider.imageModel.trim().length > 0;
+  return persona.toolIds
+    .filter((id) => id !== "image_generate" || canGenerateImages)
+    .map((id) => TOOL_REGISTRY[id]);
 }
 
 export interface ToolExecutionResult {
   content: string;
   metadata: Record<string, unknown>;
+  /** True when the call changed the persona's memory, which outlives the response it happened in. */
+  durableEffect?: boolean;
 }
 
-function terms(value: string): string[] {
-  const normalized = value.toLocaleLowerCase("ja").trim();
-  const words = normalized.split(/[\s、。,.!?！？]+/).filter(Boolean);
-  const result = [...words];
-  for (const word of words) {
-    if (/^[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]+$/u.test(word) && word.length >= 2) {
-      for (let index = 0; index < word.length - 1; index += 1) result.push(word.slice(index, index + 2));
-    }
+function stringArgument(call: ToolCall, name: string): string | undefined {
+  const value = call.arguments[name];
+  return typeof value === "string" ? value : undefined;
+}
+
+/** A bad reference is the model's to fix, so it comes back as the result. body: builtin_data/tools/memory_read.py. */
+async function atlasResult(run: () => Promise<ToolExecutionResult>): Promise<ToolExecutionResult> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof AtlasRefError) return { content: `Error: ${error.message}`, metadata: {} };
+    throw error;
   }
-  return [...new Set(result)];
 }
 
 export async function executeTool(
@@ -62,23 +110,29 @@ export async function executeTool(
   if (!persona.toolIds.includes(call.name)) throw new Error(`未登録のツールです: ${call.name}`);
   console.log("[SAIVerse Lite][tool] start", { personaId: persona.id, tool: call.name, callId: call.id });
   if (call.name === "memory_recall") {
-    const query = typeof call.arguments.query === "string" ? call.arguments.query.trim() : "";
-    const queryTerms = terms(query);
-    const memories = await repository.listMemories(persona.id);
-    const ranked = memories
-      .map((memory) => ({
-        memory,
-        score: queryTerms.length === 0 ? 1 : queryTerms.reduce((score, term) => score + (memory.content.toLocaleLowerCase("ja").includes(term) ? 1 : 0), 0),
-      }))
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)
-      .slice(0, 5)
-      .map(({ memory }) => ({ id: memory.id, kind: memory.kind, content: memory.content, updatedAt: memory.updatedAt }));
-    const content = JSON.stringify({ query, memories: ranked }, null, 2);
-    console.log("[SAIVerse Lite][tool] memory_recall complete", { query, hits: ranked.length });
-    return { content, metadata: { query, hitCount: ranked.length } };
+    const query = stringArgument(call, "query")?.trim() ?? "";
+    const { text, hitCount } = await searchMemory(repository, persona.id, query);
+    console.log("[SAIVerse Lite][tool] memory_recall complete", { query, hits: hitCount });
+    return { content: text, metadata: { query, hitCount } };
   }
-  const prompt = typeof call.arguments.prompt === "string" ? call.arguments.prompt.trim() : "";
+  if (call.name === "memory_read") {
+    return atlasResult(async () => ({ content: await readPage(repository, persona.id, stringArgument(call, "ref") ?? ""), metadata: {} }));
+  }
+  if (call.name === "memory_write") {
+    const ref = stringArgument(call, "ref");
+    const title = stringArgument(call, "title");
+    const category = stringArgument(call, "category");
+    return atlasResult(async () => {
+      const { text, written } = await writePage(repository, persona.id, {
+        content: stringArgument(call, "content") ?? "",
+        ...(ref !== undefined ? { ref } : {}),
+        ...(title !== undefined ? { title } : {}),
+        ...(category !== undefined ? { category } : {}),
+      });
+      return { content: text, metadata: {}, durableEffect: written };
+    });
+  }
+  const prompt = stringArgument(call, "prompt")?.trim() ?? "";
   if (!prompt) throw new Error("画像生成プロンプトが空です");
   const image = await provider.generateImage(prompt, signal, onRetry);
   console.log("[SAIVerse Lite][tool] image_generate complete", { promptLength: prompt.length });

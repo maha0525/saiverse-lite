@@ -2,17 +2,80 @@ import type {
   AppSettings,
   ChatMessage,
   ConversationThread,
-  MemoryEntry,
+  FragmentRecord,
+  MessagePosition,
+  PageRecord,
   Persona,
+  PersonaSession,
   ProviderConfig,
   RepositorySnapshot,
 } from "../domain";
+import { buildCoreMemoryPages, epochSeconds, type CoreMemoryDraft } from "../pageRecords";
+
+/** A walk over messages in (createdAt, seq, id) order. Rows come back in walking order. */
+export interface MessageRange {
+  direction: "forward" | "backward";
+  limit: number;
+  /** Omitted: the oldest row (forward) or the newest row (backward). */
+  start?: MessagePosition;
+  /** Off by default, so the last row of one page can start the next page. */
+  includeStart?: boolean;
+}
+
+/** Rows written to one persona in one transaction. */
+export interface PersonaRecordBatch {
+  threads?: ConversationThread[];
+  messages?: ChatMessage[];
+  pages?: PageRecord[];
+  fragments?: FragmentRecord[];
+  /** Applied to the persona's session in the same transaction. Runs synchronously. */
+  session?: (session: PersonaSession) => PersonaSession;
+}
+
+/** The persona's rows as one transaction sees them, for a write that depends on them. */
+export interface PersonaRecordState {
+  /** Every page, oldest first. Includes trunks and soft-deleted pages. */
+  pages: PageRecord[];
+  nextShortId: number;
+  nextMessageSeq: number;
+  /** Empty when the session holds none. */
+  passphrase: string;
+}
+
+export interface PersonaRecordPlan<T> {
+  write: PersonaRecordBatch;
+  /** Handed back to the caller once the write has landed. */
+  result: T;
+}
+
+export function assertBatchOwner(personaId: string, batch: PersonaRecordBatch): void {
+  const rows = [...(batch.threads ?? []), ...(batch.messages ?? []), ...(batch.pages ?? []), ...(batch.fragments ?? [])];
+  const stray = rows.find((row) => row.personaId !== personaId);
+  if (stray) throw new Error(`Batch for ${personaId} holds a row of ${stray.personaId}: ${stray.id}`);
+}
+
+/** Threads and messages are keyed by id alone, so a batch can name a row another persona already has. */
+export class RowOwnerError extends Error {
+  constructor(readonly ownerPersonaId: string) {
+    super("この中の会話は、すでに別のパートナーの会話と重なっているため書き込めません。");
+    this.name = "RowOwnerError";
+  }
+}
+
+/** The plan behind `addCoreMemories`, the same for every implementation. */
+export function addCoreMemoriesPlan(personaId: string, drafts: CoreMemoryDraft[]) {
+  return ({ pages, nextShortId }: PersonaRecordState): PersonaRecordPlan<PageRecord[]> => {
+    const written = buildCoreMemoryPages(personaId, pages, nextShortId, drafts, epochSeconds(Date.now()));
+    return { write: { pages: written }, result: written };
+  };
+}
 
 export interface LiteRepository {
   initialize(): Promise<void>;
 
   listPersonas(): Promise<Persona[]>;
   getPersona(id: string): Promise<Persona | undefined>;
+  /** A persona seen for the first time also gets its trunk pages and session. */
   putPersona(value: Persona): Promise<void>;
   deletePersona(id: string): Promise<void>;
 
@@ -22,13 +85,48 @@ export interface LiteRepository {
   deleteThread(id: string): Promise<void>;
   deleteThreads(ids: string[]): Promise<void>;
 
+  /** Every row of a thread. Use the range reads where a thread can be long. */
   listMessages(threadId: string): Promise<ChatMessage[]>;
+  getMessage(id: string): Promise<ChatMessage | undefined>;
+  readThreadMessages(threadId: string, range: MessageRange): Promise<ChatMessage[]>;
+  /** Across all threads of the persona, for Chronicle: its material is not limited to the active thread. */
+  readPersonaMessages(personaId: string, range: MessageRange): Promise<ChatMessage[]>;
   putMessage(value: ChatMessage): Promise<void>;
   deleteMessage(id: string): Promise<void>;
+  /** One above the highest seq the persona has. */
+  nextMessageSeq(personaId: string): Promise<number>;
 
-  listMemories(personaId: string): Promise<MemoryEntry[]>;
-  putMemory(value: MemoryEntry): Promise<void>;
-  deleteMemory(id: string): Promise<void>;
+  /** All pages of the category, or of the persona, oldest first. Includes trunks and soft-deleted pages. */
+  listPages(personaId: string, category?: string): Promise<PageRecord[]>;
+  getPage(personaId: string, id: string): Promise<PageRecord | undefined>;
+  getPageByShortId(personaId: string, shortId: number): Promise<PageRecord | undefined>;
+  putPage(value: PageRecord): Promise<void>;
+  deletePage(personaId: string, id: string): Promise<void>;
+  nextPageShortId(personaId: string): Promise<number>;
+  /** Numbers core_id and short_id in the same transaction as the write. Returns the pages written. */
+  addCoreMemories(personaId: string, drafts: CoreMemoryDraft[]): Promise<PageRecord[]>;
+
+  listFragments(personaId: string, entityId?: string): Promise<FragmentRecord[]>;
+  putFragment(value: FragmentRecord): Promise<void>;
+  deleteFragment(personaId: string, id: string): Promise<void>;
+
+  getSession(personaId: string): Promise<PersonaSession | undefined>;
+  putSession(value: PersonaSession): Promise<void>;
+  /** Reads and writes in one step, so a response and a background Metabolism cannot overwrite each other. `update` runs synchronously. */
+  updateSession(personaId: string, update: (session: PersonaSession) => PersonaSession): Promise<PersonaSession>;
+
+  /**
+   * All or nothing. Rows with an existing key are replaced, so a stopped import can run again.
+   * A thread or message that belongs to another persona throws RowOwnerError and nothing is written.
+   */
+  writePersonaRecords(personaId: string, batch: PersonaRecordBatch): Promise<void>;
+  /**
+   * Reads the persona's rows and writes what `plan` decides in one transaction, so no other
+   * write lands between the two. A write that numbers a page or compares against the current
+   * rows goes through here. `plan` runs synchronously; if it throws, nothing is written.
+   * The same refusals as `writePersonaRecords` apply.
+   */
+  updatePersonaRecords<T>(personaId: string, plan: (state: PersonaRecordState) => PersonaRecordPlan<T>): Promise<T>;
 
   listProviders(): Promise<ProviderConfig[]>;
   getProvider(id: string): Promise<ProviderConfig | undefined>;

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { newId, type Persona, type ProviderConfig, type ToolId } from "../domain";
+import { formatApproxSizeGb, LITERT_MODELS } from "../llm/litertModels";
 import { buildPersonaPrompt, loadDraft, PERSONA_TEMPLATES, saveDraft } from "../onboarding";
 
 const NEW_FORM_DRAFT_KEY = "personaForm.new";
@@ -43,6 +44,8 @@ function blankPersona(provider: ProviderConfig | undefined): Persona {
 export function PersonaView({ personas, providers, selectedId, onSelect, onSave, onDelete }: PersonaViewProps) {
   const selected = personas.find((persona) => persona.id === selectedId);
   const [draft, setDraft] = useState<Persona>(() => selected ?? blankPersona(providers[0]));
+  const draftProvider = providers.find((provider) => provider.id === draft.providerId);
+  const isLocalModelProvider = draftProvider?.kind === "litert-local";
   const [isNew, setIsNew] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   useEffect(() => {
@@ -129,7 +132,11 @@ export function PersonaView({ personas, providers, selectedId, onSelect, onSave,
               const provider = providers.find((item) => item.id === event.target.value);
               setDraft({ ...draft, providerId: event.target.value, model: provider?.defaultModel ?? draft.model });
             }}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label>
-            <label className="field"><span>モデルID</span><input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} required /></label>
+            <label className="field"><span>モデルID</span>{isLocalModelProvider
+              ? <select value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>
+                  {Object.values(LITERT_MODELS).map((model) => <option key={model.id} value={model.id}>{model.label} — {formatApproxSizeGb(model.approxByteLength)}</option>)}
+                </select>
+              : <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} required />}</label>
           </div>
           <fieldset className="tool-field"><legend>固定ツールセット</legend>
             <label><input type="checkbox" checked={draft.toolIds.includes("memory_recall")} onChange={(event) => setTool("memory_recall", event.target.checked)} /> 記憶想起</label>

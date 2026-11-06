@@ -3,7 +3,7 @@ import type { ProviderConfig } from "../domain";
 import { AnthropicProvider } from "./anthropic";
 import { GeminiProvider } from "./gemini";
 import { OpenAiProvider } from "./openai";
-import type { ProviderEvent, ProviderRequest } from "./types";
+import { ProviderHttpError, StructuredOutputRefusedError, type CompletionRequest, type ProviderEvent, type ProviderRequest } from "./types";
 
 function config(kind: ProviderConfig["kind"]): ProviderConfig {
   return {
@@ -47,6 +47,41 @@ async function collectEvents(stream: AsyncGenerator<ProviderEvent>): Promise<Pro
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("structured output on an OpenAI compatible server", () => {
+  const structured = (): CompletionRequest => ({
+    model: "test-model", systemPrompt: "", memoryContext: "", messages: [user("x")],
+    responseSchema: { type: "object", properties: { reflection: { type: "string" } } },
+  });
+  const answering = (status: number): void => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "nope" } }), { status })));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  };
+
+  it.each([400, 422, 501])("reads HTTP %i as a refusal", async (status) => {
+    answering(status);
+    await expect(new OpenAiProvider(config("openai-compatible")).complete(structured())).rejects.toBeInstanceOf(StructuredOutputRefusedError);
+  });
+
+  it("keeps an authentication failure a failure", async () => {
+    answering(401);
+    const failure = await new OpenAiProvider(config("openai-compatible")).complete(structured()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderHttpError);
+  });
+
+  it("keeps a 400 a failure when no schema was asked for", async () => {
+    answering(400);
+    const { responseSchema: _schema, ...plain } = structured();
+    const failure = await new OpenAiProvider(config("openai-compatible")).complete(plain).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderHttpError);
+  });
+
+  it("keeps a 400 from OpenAI itself a failure", async () => {
+    answering(400);
+    const failure = await new OpenAiProvider(config("openai")).complete(structured()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderHttpError);
+  });
 });
 
 describe("Gemini tool-call round trip", () => {
@@ -149,6 +184,8 @@ describe("provider transports", () => {
     ]);
     const cacheBody = JSON.parse(String(calls[0]?.init?.body)) as {
       tools: Array<{ functionDeclarations: Array<Record<string, unknown>> }>;
+      toolConfig: unknown;
+      systemInstruction: unknown;
     };
     const generateBody = JSON.parse(String(calls[1]?.init?.body)) as Record<string, unknown>;
     const expectedSchema = {
@@ -160,12 +197,28 @@ describe("provider transports", () => {
     const cacheDeclaration = cacheBody.tools[0]?.functionDeclarations[0];
     expect(cacheDeclaration?.parameters).toBeUndefined();
     expect(cacheDeclaration?.parametersJsonSchema).toEqual(expectedSchema);
-    const generateTools = generateBody.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>;
-    const generateDeclaration = generateTools[0]?.functionDeclarations[0];
-    expect(generateDeclaration?.parameters).toBeUndefined();
-    expect(generateDeclaration?.parametersJsonSchema).toEqual(expectedSchema);
+    expect(cacheBody.toolConfig).toEqual({ functionCallingConfig: { mode: "AUTO" } });
+    expect(cacheBody.systemInstruction).toBeDefined();
+    // The API answers 400 when a request naming a cache sets any of these.
     expect(generateBody.cachedContent).toBe("cachedContents/test");
+    expect(generateBody.tools).toBeUndefined();
+    expect(generateBody.toolConfig).toBeUndefined();
     expect(generateBody.systemInstruction).toBeUndefined();
+  });
+
+  it("keeps tools on the Gemini request when no cache is made", async () => {
+    let captured: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      captured = init;
+      return new Response(`data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }));
+    const provider = new GeminiProvider(config("gemini"));
+    for await (const _event of provider.stream(request([user("short")]))) { /* drain */ }
+    const body = JSON.parse(String(captured?.body)) as { tools: Array<{ functionDeclarations: Array<Record<string, unknown>> }>; toolConfig: unknown; systemInstruction: unknown; cachedContent?: unknown };
+    expect(body.cachedContent).toBeUndefined();
+    expect(body.tools[0]?.functionDeclarations[0]?.parametersJsonSchema).toBeDefined();
+    expect(body.toolConfig).toEqual({ functionCallingConfig: { mode: "AUTO" } });
+    expect(body.systemInstruction).toBeDefined();
   });
 
   it("sends no cache_control by default (cache is opt-in)", async () => {
@@ -303,7 +356,7 @@ describe("provider transports", () => {
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
     }]);
     expect(body.input).toEqual([
-      { role: "developer", content: "【長期記憶】\n猫が好き" },
+      { role: "user", content: "猫が好き" },
       { role: "user", content: "思い出して" },
       { type: "reasoning", id: "rs_previous", summary: [], encrypted_content: "previous-encrypted-reasoning" },
       { type: "function_call", id: "fc_previous", call_id: "call_1", name: "memory_recall", arguments: "{\"query\":\"dog\"}" },

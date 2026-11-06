@@ -1,30 +1,42 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import logoUrl from "./assets/logo.png";
-import { ChatService, type ChatStatusTone } from "./chatService";
-import { presentChatError, type ChatErrorPresentation } from "./chatErrors";
+import { ChatService, type ChatStatusTone, type MetabolismState } from "./chatService";
+import { ChatOperationError, presentChatError, type ChatErrorPresentation } from "./chatErrors";
 import { ChatErrorNotice } from "./components/ChatErrorNotice";
 import { ChatView } from "./components/ChatView";
 import { DataView } from "./components/DataView";
+import { ImportResumePanel } from "./components/ImportResumePanel";
 import { MemoryView } from "./components/MemoryView";
 import { Nav, type AppView } from "./components/Nav";
+import { PackImportDialog } from "./components/PackImportDialog";
 import { PersonaView } from "./components/PersonaView";
 import { SettingsView } from "./components/SettingsView";
+import { deleteRowsAfter, hasRowsAfter, MESSAGE_PAGE_ROWS, readLatestRows, readOlderRows } from "./conversationPage";
 import {
   DEFAULT_SETTINGS,
   newId,
   type AppSettings,
   type ChatMessage,
   type ConversationThread,
-  type MemoryEntry,
   type Persona,
+  type PersonaSession,
   type ProviderConfig,
 } from "./domain";
 import { exportFullBackup, exportPersona, exportSaiverseMemory, importSaiverseMemory, parseFullBackup, stringifyExport } from "./formats";
-import { saveClaudeMemories, saveImportedConversations, type ClaudeMemoryText, type ImportedConversation } from "./importers";
+import { saveClaudeMemories, saveImportedConversations, saveSaiverseMemoryImport, type ClaudeMemoryText, type ImportedConversation } from "./importers";
+import { ensureEngine, getEngineStatus, subscribe as subscribeLiteRtEngine, type LiteRtEngineStatus } from "./llm/litertEngine";
+import { isLiteRtModelId } from "./llm/litertModels";
 import type { ConversationImportTarget } from "./components/OfficialImportDialog";
 import { LEGAL_VERSION } from "./legal";
 import { completeOnboarding, loadOnboarding, resetOnboarding, saveDraft } from "./onboarding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
+import { withoutPassphrase } from "./memory/conversation";
+import { activateThread } from "./memory/session";
+import { resolveInitialAnchor } from "./memory/window";
+import { readAttachment, type AttachmentItem } from "./pack/attachments";
+import { exportPersonaPack, type PackExportProgress } from "./pack/exportPack";
+import { importPersonaPack, type PackImportProgress } from "./pack/importPack";
+import { OpfsPackStore } from "./pack/packStore";
 import { IndexedDbRepository } from "./storage/indexedDbRepository";
 import { requestPersistentStorage } from "./storage/repository";
 
@@ -34,6 +46,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 const repository = new IndexedDbRepository();
+const packStore = new OpfsPackStore();
 const chatService = new ChatService(repository);
 
 function downloadJson(filename: string, value: unknown): void {
@@ -50,6 +63,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function readImage(personaId: string, item: AttachmentItem): Promise<Blob | null> {
+  return readAttachment(packStore, personaId, item);
+}
+
 export default function App() {
   const [view, setView] = useState<AppView>("chat");
   const [loading, setLoading] = useState(true);
@@ -61,7 +78,12 @@ export default function App() {
   const [threads, setThreads] = useState<ConversationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [session, setSession] = useState<PersonaSession | null>(null);
+  /** What a running Metabolism is doing, per persona: it outlives the response and the screen it started on. */
+  const [metabolismText, setMetabolismText] = useState<Record<string, string>>({});
+  const [memoryRevision, setMemoryRevision] = useState(0);
+  const [resumingImport, setResumingImport] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [chatStatus, setChatStatus] = useState<{ text: string; tone: ChatStatusTone }>({ text: "", tone: "info" });
   const [sending, setSending] = useState(false);
@@ -71,35 +93,103 @@ export default function App() {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [wizard, setWizard] = useState<"full" | "consent" | null>(null);
 
+  const [engineStatus, setEngineStatus] = useState<LiteRtEngineStatus>(() => getEngineStatus());
+
   const selectedPersona = personas.find((persona) => persona.id === selectedPersonaId) ?? personas[0];
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
   const selectedPersonaIdRef = useRef(selectedPersonaId);
   const activeThreadIdRef = useRef(activeThreadId);
   selectedPersonaIdRef.current = selectedPersonaId;
   activeThreadIdRef.current = activeThreadId;
+  /** How many rows are on the screen, so a refresh does not drop what the user read back to. */
+  const loadedRowsRef = useRef(0);
+  const threadLoadRef = useRef(0);
+  const selectedSession = session?.personaId === selectedPersona?.id ? session : null;
+  const importing = selectedSession?.importState === "importing";
+
+  // 端末内モデル (litert-local) を使うペルソナだけ、選ばれた時点で Engine の読み込みを
+  // 先に始めておく (画面はブロックしない — 完了は engineStatus の購読で知る)。
+  const selectedPersonaProvider = providers.find((provider) => provider.id === selectedPersona?.providerId);
+  useEffect(() => {
+    if (!selectedPersona || selectedPersonaProvider?.kind !== "litert-local") return;
+    if (!isLiteRtModelId(selectedPersona.model)) return;
+    void ensureEngine(selectedPersona.model).catch((error) => {
+      console.error("[SAIVerse Lite][llm] failed to pre-load local model", { modelId: selectedPersona.model, error });
+    });
+    // selectedPersonaProvider は依存に入れない: プロバイダ一覧が再取得されるたびに参照が
+    // 変わるが、ペルソナ・モデルが同じなら ensureEngine() 側で既読エンジンを再利用するだけで
+    // 実害はない。ここではペルソナ/モデルの切り替えだけを再読み込みの契機にする。
+  }, [selectedPersona?.id, selectedPersona?.model]);
+
+  // 購読を張る前に状態が動いていることがある (上の先読み effect がこの effect より先に走り、
+  // ensureEngine() が同期的に loading を通知してしまう)。登録した瞬間に現在値を取り直さないと、
+  // 「読み込み中」の通知だけを聞き逃し、待っている間ずっと何も表示されない。
+  useEffect(() => {
+    setEngineStatus(getEngineStatus());
+    return subscribeLiteRtEngine(setEngineStatus);
+  }, []);
+
+  // 「今見ているペルソナが端末内モデルを使っていて、かつ engine が扱っているのがそのモデルか」
+  // が一致するときだけ ChatView へ状態を渡す。無関係なペルソナを見ているときに裏の読み込み状況を
+  // 出すと利用者が混乱するため、関係なければ null にする。
+  const localModelStatus = selectedPersona && selectedPersonaProvider?.kind === "litert-local"
+    && isLiteRtModelId(selectedPersona.model) && engineStatus.modelId === selectedPersona.model
+    ? engineStatus
+    : null;
+  const retryLocalModel = () => {
+    if (!selectedPersona || !isLiteRtModelId(selectedPersona.model)) return;
+    void ensureEngine(selectedPersona.model).catch((error) => {
+      console.error("[SAIVerse Lite][llm] retry to load local model failed", { modelId: selectedPersona.model, error });
+    });
+  };
 
   const loadThread = useCallback(async (threadId: string | null) => {
+    const load = threadLoadRef.current + 1;
+    threadLoadRef.current = load;
+    const sameThread = threadId === activeThreadIdRef.current;
     setActiveThreadId(threadId);
-    setMessages(threadId ? await repository.listMessages(threadId) : []);
+    const page = threadId
+      ? await readLatestRows(repository, threadId, sameThread ? Math.max(MESSAGE_PAGE_ROWS, loadedRowsRef.current) : MESSAGE_PAGE_ROWS)
+      : { rows: [], hasOlder: false };
+    if (threadLoadRef.current !== load) return;
+    loadedRowsRef.current = page.rows.length;
+    setMessages(page.rows);
+    setHasOlder(page.hasOlder);
+  }, []);
+
+  /** Opening a thread is what continues it, so the session follows whatever the screen shows. */
+  const continueInThread = useCallback(async (personaId: string, threadId: string): Promise<PersonaSession | null> => {
+    const persona = await repository.getPersona(personaId);
+    return persona ? activateThread(repository, persona, threadId) : null;
   }, []);
 
   const loadPersonaData = useCallback(async (personaId: string, preferredThreadId?: string) => {
-    let nextThreads = await repository.listThreads(personaId);
-    if (nextThreads.length === 0) {
+    let current = await repository.getSession(personaId) ?? null;
+    const stopped = current?.importState === "importing";
+    let nextThreads = (await repository.listThreads(personaId)).filter((thread) => !thread.stelis);
+    // A stopped import owns the persona's rows until it finishes.
+    if (nextThreads.length === 0 && !stopped) {
       const now = Date.now();
       const thread: ConversationThread = { id: newId("thread"), personaId, title: "新しい会話", createdAt: now, updatedAt: now };
       await repository.putThread(thread);
       nextThreads = [thread];
     }
     setThreads(nextThreads);
-    setMemories(await repository.listMemories(personaId));
-    const nextThreadId = preferredThreadId && nextThreads.some((thread) => thread.id === preferredThreadId)
-      ? preferredThreadId
-      : nextThreads[0]?.id ?? null;
+    setSession(current);
+    const nextThreadId = [preferredThreadId, current?.activeThreadId, nextThreads[0]?.id]
+      .find((id) => id && nextThreads.some((thread) => thread.id === id)) ?? null;
     await loadThread(nextThreadId);
-  }, [loadThread]);
+    if (!nextThreadId || nextThreadId === current?.activeThreadId) return;
+    try {
+      current = await continueInThread(personaId, nextThreadId);
+      if (selectedPersonaIdRef.current === personaId) setSession(current);
+    } catch (error) {
+      // The next response settles the same thing, so the thread stays open.
+      console.error("[SAIVerse Lite][chat] thread could not be made active", { personaId, threadId: nextThreadId, error });
+    }
+  }, [continueInThread, loadThread]);
 
-  const refreshBase = useCallback(async (preferredPersonaId?: string) => {
+  const refreshBase = useCallback(async (preferredPersonaId?: string, preferredThreadId?: string) => {
     const [nextPersonas, nextProviders, nextSettings] = await Promise.all([
       repository.listPersonas(), repository.listProviders(), repository.getSettings(),
     ]);
@@ -110,13 +200,14 @@ export default function App() {
       ? preferredPersonaId
       : nextPersonas[0]?.id ?? "";
     setSelectedPersonaId(nextPersonaId);
-    if (nextPersonaId) await loadPersonaData(nextPersonaId);
+    if (nextPersonaId) await loadPersonaData(nextPersonaId, preferredThreadId);
   }, [loadPersonaData]);
 
   useEffect(() => {
     void (async () => {
       try {
         await repository.initialize();
+        void packStore.clearWork().catch((error: unknown) => console.warn("[SAIVerse Lite][pack] work files could not be cleared", error));
         const persisted = await requestPersistentStorage();
         const current = await repository.getSettings();
         if (current.storagePersisted !== persisted) await repository.putSettings({ ...current, storagePersisted: persisted });
@@ -128,7 +219,7 @@ export default function App() {
           let hasHistory = false;
           for (const persona of await repository.listPersonas()) {
             for (const thread of await repository.listThreads(persona.id)) {
-              if ((await repository.listMessages(thread.id)).length > 0) { hasHistory = true; break; }
+              if ((await repository.readThreadMessages(thread.id, { direction: "forward", limit: 1 })).length > 0) { hasHistory = true; break; }
             }
             if (hasHistory) break;
           }
@@ -181,9 +272,61 @@ export default function App() {
     await loadPersonaData(id);
   };
 
+  const selectThread = async (id: string) => {
+    if (!selectedPersona) return;
+    const personaId = selectedPersona.id;
+    try {
+      await loadThread(id);
+      const next = await continueInThread(personaId, id);
+      if (selectedPersonaIdRef.current === personaId) setSession(next);
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Failed to open thread", { threadId: id, error });
+      setNotice(`会話を開けませんでした: ${errorMessage(error)}`);
+    }
+  };
+
+  const loadOlderMessages = async () => {
+    const threadId = activeThreadId;
+    const oldest = messages[0];
+    if (!threadId || !oldest) return;
+    try {
+      const page = await readOlderRows(repository, threadId, oldest);
+      if (activeThreadIdRef.current !== threadId) return;
+      loadedRowsRef.current += page.rows.length;
+      setMessages((current) => [...page.rows, ...current]);
+      setHasOlder(page.hasOlder);
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Failed to read older rows", { threadId, error });
+      setNotice(`前の発言を読み込めませんでした: ${errorMessage(error)}`);
+    }
+  };
+
   const refreshConversation = async (expectedPersonaId: string, expectedThreadId: string) => {
     if (selectedPersonaIdRef.current !== expectedPersonaId || activeThreadIdRef.current !== expectedThreadId) return;
     await loadPersonaData(expectedPersonaId, expectedThreadId);
+  };
+
+  const trackMetabolism = (personaId: string) => (state: MetabolismState) => {
+    setMetabolismText((current) => {
+      if (state.running) return { ...current, [personaId]: state.text };
+      const { [personaId]: _finished, ...rest } = current;
+      return rest;
+    });
+    if (state.running) return;
+    setMemoryRevision((revision) => revision + 1);
+    void repository.getSession(personaId).then((next) => {
+      if (selectedPersonaIdRef.current === personaId) setSession(next ?? null);
+    }).catch((error: unknown) => console.error("[SAIVerse Lite][chat] session could not be reloaded after Metabolism", { personaId, error }));
+  };
+
+  const dismissMetabolismNotice = async () => {
+    if (!selectedPersona) return;
+    try {
+      setSession(await repository.updateSession(selectedPersona.id, (current) => ({ ...current, metabolismNotice: null })));
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Metabolism notice could not be closed", error);
+      setNotice(`通知を閉じられませんでした: ${errorMessage(error)}`);
+    }
   };
 
   const createThread = async () => {
@@ -198,7 +341,7 @@ export default function App() {
     if (!selectedPersona || sending) return false;
     const requestedIds = new Set(ids);
     const targets = threads.filter((thread) => requestedIds.has(thread.id));
-    if (targets.length === 0 || !window.confirm(`${targets.length}件の会話を削除しますか？\n選んだ会話の発言と、会話に紐づく記憶は元に戻せません。`)) return false;
+    if (targets.length === 0 || !window.confirm(`${targets.length}件の会話を削除しますか？\n選んだ会話の発言は元に戻せません。`)) return false;
     try {
       await repository.deleteThreads(targets.map((thread) => thread.id));
       for (const target of targets) saveDraft(`composer.${target.id}`, "");
@@ -232,6 +375,7 @@ export default function App() {
               setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
             }
           },
+          onMetabolism: trackMetabolism(selectedPersona.id),
         });
       } catch (error) {
         console.error("[SAIVerse Lite][chat] send failed", error);
@@ -241,7 +385,8 @@ export default function App() {
         } catch (refreshError) {
           console.error("[SAIVerse Lite][chat] refresh after failed send also failed", refreshError);
         }
-        return false;
+        // A kept turn is in the history already; the composer getting the text back would send it twice.
+        return error instanceof ChatOperationError && error.keptTurn;
       }
       try {
         await refreshConversation(selectedPersona.id, activeThread.id);
@@ -257,14 +402,16 @@ export default function App() {
     }
   };
 
-  const editMessage = async (message: ChatMessage, content: string) => {
-    const currentMessages = await repository.listMessages(message.threadId);
-    if (message.role === "user") {
-      const position = currentMessages.findIndex((item) => item.id === message.id);
-      for (const later of currentMessages.slice(position + 1)) await repository.deleteMessage(later.id);
+  const editMessage = async (message: ChatMessage, content: string): Promise<boolean> => {
+    try {
+      await repository.putMessage(await withoutPassphrase(repository, { ...message, content, editedAt: Date.now() }));
+      await loadThread(message.threadId);
+      return true;
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Failed to edit message", { messageId: message.id, error });
+      setNotice(`発言を編集できませんでした: ${errorMessage(error)}`);
+      return false;
     }
-    await repository.putMessage({ ...message, content, editedAt: Date.now() });
-    await loadThread(message.threadId);
   };
 
   const deleteMessage = async (message: ChatMessage) => {
@@ -274,12 +421,27 @@ export default function App() {
     try {
       await repository.deleteMessage(message.id);
       await loadThread(message.threadId);
-      if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
       setNotice(`${speaker}の発言を削除しました。`);
     } catch (error) {
       console.error("[SAIVerse Lite][chat] Failed to delete message", { messageId: message.id, error });
       setNotice(`発言を削除できませんでした: ${errorMessage(error)}`);
     }
+  };
+
+  const replyAgainFrom = async (message: ChatMessage) => {
+    if (sending) return;
+    try {
+      if (await hasRowsAfter(repository, message)) {
+        if (!window.confirm("この発言より後の会話をすべて削除して、この発言への返答を作り直します。削除した会話は元に戻せません。続けますか？")) return;
+        await deleteRowsAfter(repository, message);
+        await loadThread(message.threadId);
+      }
+    } catch (error) {
+      console.error("[SAIVerse Lite][chat] Failed to delete the rows after a message", { messageId: message.id, error });
+      setNotice(`この発言より後の会話を削除できませんでした: ${errorMessage(error)}`);
+      return;
+    }
+    await regenerate();
   };
 
   const regenerate = async () => {
@@ -296,6 +458,7 @@ export default function App() {
           onStatus: (text, tone) => {
             if (activeThreadIdRef.current === activeThreadId && selectedPersonaIdRef.current === selectedPersona.id) setChatStatus({ text, tone: tone ?? "info" });
           },
+          onMetabolism: trackMetabolism(selectedPersona.id),
         });
       } catch (error) {
         console.error("[SAIVerse Lite][chat] regenerate failed", error);
@@ -321,30 +484,47 @@ export default function App() {
   const savePersona = async (persona: Persona) => { await repository.putPersona(persona); await refreshBase(persona.id); };
   const deletePersona = async (id: string) => {
     if (!window.confirm("このパートナーと端末内の会話・記憶を削除しますか？")) return;
+    // A Metabolism still running would write pages for a persona that no longer exists.
+    await chatService.whenSettled(id);
     await repository.deletePersona(id);
+    await packStore.delete(id).catch((error: unknown) => console.warn("[SAIVerse Lite][pack] stored pack could not be deleted", { personaId: id, error }));
     await refreshBase();
-  };
-  const createMemory = async (content: string) => {
-    if (!selectedPersona) return;
-    const now = Date.now();
-    await repository.putMemory({ id: newId("memory"), personaId: selectedPersona.id, threadId: null, kind: "note", content, sourceMessageIds: [], createdAt: now, updatedAt: now });
-    setMemories(await repository.listMemories(selectedPersona.id));
-  };
-  const editMemory = async (memory: MemoryEntry, content: string) => {
-    await repository.putMemory({ ...memory, content, updatedAt: Date.now() });
-    if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
-  };
-  const deleteMemory = async (id: string) => {
-    if (!window.confirm("この記憶を削除しますか？")) return;
-    await repository.deleteMemory(id);
-    if (selectedPersona) setMemories(await repository.listMemories(selectedPersona.id));
   };
 
   const exportCurrentMemory = async () => {
     if (!selectedPersona) return;
     const snapshot = await repository.exportSnapshot();
-    const value = exportSaiverseMemory(selectedPersona, snapshot.threads, snapshot.messages, snapshot.memories);
+    const value = exportSaiverseMemory(selectedPersona, snapshot.threads, snapshot.messages, snapshot.pages);
     downloadJson(`${selectedPersona.id}_saiverse-memory.json`, value);
+  };
+
+  const importPack = async (file: File, providerId: string, model: string, onProgress: (progress: PackImportProgress) => void) => {
+    setDataBusy(true);
+    setNotice("");
+    try {
+      const result = await importPersonaPack(file, repository, packStore, { providerId, model, resolveInitialAnchor }, onProgress);
+      await refreshBase(result.personaId, result.activeThreadId ?? undefined);
+      return result;
+    } catch (error) {
+      // A stopped import leaves its persona in the list.
+      await refreshBase(selectedPersonaIdRef.current);
+      throw error;
+    } finally {
+      setDataBusy(false);
+    }
+  };
+  const exportPack = async (personaId: string, onProgress: (progress: PackExportProgress) => void) => {
+    setDataBusy(true);
+    setNotice("");
+    try {
+      return await exportPersonaPack(personaId, repository, packStore, onProgress);
+    } finally {
+      setDataBusy(false);
+    }
+  };
+  const listInterruptedImports = async () => {
+    const sessions = await Promise.all(personas.map((persona) => repository.getSession(persona.id)));
+    return personas.filter((_, index) => sessions[index]?.importState === "importing").map((persona) => persona.name);
   };
 
   const runDataAction = async (action: () => Promise<string>) => {
@@ -355,16 +535,23 @@ export default function App() {
 
   const content = (() => {
     if (!selectedPersona) return <div className="empty-state"><h2>パートナーを読み込めませんでした</h2></div>;
-    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} onSelectThread={(id) => void loadThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onDeleteMessage={deleteMessage} onRegenerate={regenerate} />;
+    if (view === "chat") return <ChatView persona={selectedPersona} settings={settings} threads={threads} activeThreadId={activeThreadId} messages={messages} hasOlder={hasOlder} importing={importing} importBusy={dataBusy} metabolismText={metabolismText[selectedPersona.id] ?? ""} metabolismError={selectedSession?.metabolismError ?? null} metabolismNotice={selectedSession?.metabolismNotice ?? null} streamingText={streamingText} status={chatStatus.text} statusTone={chatStatus.tone} sending={sending} localModelStatus={localModelStatus} onRetryLocalModel={retryLocalModel} onSelectThread={(id) => void selectThread(id)} onCreateThread={() => void createThread()} onDeleteThreads={deleteThreads} onSend={send} onEdit={editMessage} onReplyAgain={replyAgainFrom} onDeleteMessage={deleteMessage} onRegenerate={regenerate} onLoadOlder={loadOlderMessages} onResumeImport={() => setResumingImport(true)} onDismissMetabolismNotice={() => void dismissMetabolismNotice()} onReadImage={readImage} />;
     if (view === "personas") return <PersonaView personas={personas} providers={providers} selectedId={selectedPersona.id} onSelect={(id) => void selectPersona(id)} onSave={savePersona} onDelete={deletePersona} />;
-    if (view === "memory") return <MemoryView persona={selectedPersona} memories={memories} onCreate={createMemory} onEdit={editMemory} onDelete={deleteMemory} />;
+    if (view === "memory") {
+      return importing
+        ? <section className="view content-view"><ImportResumePanel personaName={selectedPersona.name} busy={dataBusy} onResume={() => setResumingImport(true)} /></section>
+        : <MemoryView key={selectedPersona.id} persona={selectedPersona} repository={repository} revision={memoryRevision} />;
+    }
     if (view === "data") return <DataView
       persona={selectedPersona} personas={personas} providers={providers} busy={dataBusy} notice={notice}
+      onImportPack={importPack}
+      onExportPack={(onProgress) => exportPack(selectedPersona.id, onProgress)}
+      listInterruptedImports={listInterruptedImports}
       onExportPersona={() => downloadJson(`${selectedPersona.id}_persona.json`, exportPersona(selectedPersona))}
       onExportMemory={exportCurrentMemory}
       onExportBackup={() => runDataAction(async () => { downloadJson("saiverse-lite-backup.json", exportFullBackup(await repository.exportSnapshot())); return "フルバックアップを書き出しました。"; })}
-      onImportBackup={(file) => runDataAction(async () => { if (!window.confirm("現在の端末内データをバックアップ内容で置き換えますか？")) return "復元をキャンセルしました。"; await repository.replaceSnapshot(parseFullBackup(JSON.parse(await file.text()))); await refreshBase(); return "バックアップを復元しました。APIキーは再入力してください。"; })}
-      onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); for (const thread of imported.threads) await repository.putThread(thread); for (const message of imported.messages) await repository.putMessage(message); for (const memory of imported.memories) await repository.putMemory(memory); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
+      onImportBackup={(file) => runDataAction(async () => { if (!window.confirm("現在の端末内データをバックアップ内容で置き換えますか？")) return "復元をキャンセルしました。"; await Promise.all(personas.map((persona) => chatService.whenSettled(persona.id))); await repository.replaceSnapshot(parseFullBackup(JSON.parse(await file.text()))); await refreshBase(); return "バックアップを復元しました。APIキーは再入力してください。"; })}
+      onImportNative={(file) => runDataAction(async () => { const imported = importSaiverseMemory(JSON.parse(await file.text()), selectedPersona.id); await saveSaiverseMemoryImport(repository, selectedPersona.id, imported); await loadPersonaData(selectedPersona.id); return `${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`; })}
       onImportOfficial={async (target: ConversationImportTarget, conversations: ImportedConversation[], memories: ClaudeMemoryText[]) => {
         setDataBusy(true);
         setNotice("");
@@ -428,6 +615,7 @@ export default function App() {
   if (wizard) {
     return <OnboardingWizard
       repository={repository}
+      onImportPack={(file, onProgress) => importPack(file, "provider_mock", "mock-friendly", onProgress)}
       consentAlreadyGiven={settings.consentVersion === LEGAL_VERSION}
       consentOnly={wizard === "consent"}
       onConsent={async () => {
@@ -451,6 +639,7 @@ export default function App() {
         {notice && view !== "data" && <div className="global-notice" role="alert"><span>{notice}</span><button className="notice-close" onClick={() => setNotice("")} aria-label="閉じる">×</button></div>}
         {content}
       </main>
+      {resumingImport && selectedPersona && <PackImportDialog providers={providers} defaultProviderId={selectedPersona.providerId} defaultModel={selectedPersona.model} interruptedNames={[selectedPersona.name]} onImport={importPack} onClose={() => setResumingImport(false)} />}
     </div>
   );
 }

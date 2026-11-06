@@ -1,10 +1,10 @@
-import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import { randomId, type ProviderConfig, type ToolCall, type ToolId } from "../domain";
 import { fetchWithRetry } from "./retry";
 import { readSse, safeJson } from "./sse";
-import { assertOk, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
+import { assertOk, closeJsonSchema, type CompletionRequest, type CompletionResult, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
 
-function anthropicMessages(messages: ProviderMessage[]): Array<Record<string, unknown>> {
-  return messages.map((message) => {
+function anthropicMessages(messages: ProviderMessage[], memoryContext: string): Array<Record<string, unknown>> {
+  const converted = messages.map((message): Record<string, unknown> => {
     if (message.role === "tool") {
       return { role: "user", content: [{ type: "tool_result", tool_use_id: message.toolCallId, content: message.content }] };
     }
@@ -19,6 +19,7 @@ function anthropicMessages(messages: ProviderMessage[]): Array<Record<string, un
     }
     return { role: message.role, content: message.content };
   });
+  return memoryContext ? [{ role: "user", content: memoryContext }, ...converted] : converted;
 }
 
 // 会話履歴の末尾にキャッシュ打点を置く。次のターンは「ツール定義+システム+記憶+履歴全体」が
@@ -68,7 +69,44 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 }
 
 export class AnthropicProvider implements LlmProvider {
+  readonly supportsStructuredOutput = true;
+
   constructor(readonly config: ProviderConfig) {}
+
+  async complete(request: CompletionRequest): Promise<CompletionResult> {
+    const body: Record<string, unknown> = {
+      model: request.model,
+      max_tokens: request.maxOutputTokens ?? 4096,
+      messages: anthropicMessages(request.messages, request.memoryContext),
+    };
+    if (request.systemPrompt) body.system = request.systemPrompt;
+    if (request.responseSchema) {
+      body.output_config = { format: { type: "json_schema", schema: closeJsonSchema(request.responseSchema) } };
+    }
+    const response = await fetchWithRetry(`${this.config.baseUrl.replace(/\/$/, "")}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": this.config.apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify(body),
+      signal: request.signal ?? null,
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
+    await assertOk(response, this.config.label, request.model);
+    const payload = await response.json() as {
+      content?: Array<{ type?: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+    };
+    const cacheRead = Number(payload.usage?.cache_read_input_tokens ?? 0);
+    return {
+      text: (payload.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join(""),
+      inputTokens: Number(payload.usage?.input_tokens ?? 0) + cacheRead + Number(payload.usage?.cache_creation_input_tokens ?? 0),
+      outputTokens: Number(payload.usage?.output_tokens ?? 0),
+      cachedTokens: cacheRead,
+    };
+  }
 
   async *stream(request: ProviderRequest): AsyncGenerator<ProviderEvent> {
     // キャッシュは明示設定時のみ (既定 none)。書き込み割増 (5m=1.25倍/1h=2倍) があるため、
@@ -80,7 +118,6 @@ export class AnthropicProvider implements LlmProvider {
         ? { type: "text", text: request.systemPrompt, cache_control: cacheControl }
         : { type: "text", text: request.systemPrompt },
     ];
-    if (request.memoryContext) system.push({ type: "text", text: `【長期記憶】\n${request.memoryContext}` });
     const headers: Record<string, string> = {
       "content-type": "application/json",
       "x-api-key": this.config.apiKey,
@@ -88,7 +125,7 @@ export class AnthropicProvider implements LlmProvider {
       "anthropic-dangerous-direct-browser-access": "true",
     };
     if (ttl === "1h") headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11";
-    const baseMessages = anthropicMessages(request.messages);
+    const baseMessages = anthropicMessages(request.messages, request.memoryContext);
     const body: Record<string, unknown> = {
       model: request.model,
       max_tokens: 4096,
@@ -135,7 +172,7 @@ export class AnthropicProvider implements LlmProvider {
         const block = parsed.content_block as Record<string, unknown> | undefined;
         if (block?.type === "tool_use") {
           toolBlocks.set(Number(parsed.index), {
-            id: String(block.id ?? `toolu_${crypto.randomUUID()}`),
+            id: String(block.id ?? `toolu_${randomId()}`),
             name: String(block.name ?? ""),
             json: "",
             initialInput: objectValue(block.input),

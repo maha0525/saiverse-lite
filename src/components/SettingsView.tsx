@@ -1,8 +1,9 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { newId, type AnthropicCacheTtl, type AppSettings, type ProviderConfig, type ProviderKind } from "../domain";
+import { isWebGpuSupported } from "../llm/litertEngine";
 import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
-import { DEFAULT_BASE_URL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_LABEL } from "../providerDefaults";
+import { DEFAULT_BASE_URL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_LABEL, requiresApiKey } from "../providerDefaults";
 import { THIRD_PARTY_LICENSES } from "../thirdPartyLicenses";
 import { LegalModal } from "./LegalModal";
 
@@ -76,12 +77,21 @@ export function SettingsView(props: SettingsViewProps) {
             {props.providers.map((provider) => <button type="button" key={provider.id} className={selectedId === provider.id ? "chip selected" : "chip"} onClick={() => setSelectedId(provider.id)}>{provider.label}</button>)}
           </div>
           <label className="field"><span>種類</span><select value={draft.kind} disabled={draft.id === "provider_mock"} onChange={(event) => setDraft(newProvider(event.target.value as ProviderKind))}>
-            <option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="openai-compatible">OpenAI互換URL</option><option value="mock">モック</option>
+            <option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="openai-compatible">OpenAI互換URL</option>
+            {/* 端末内モデルは新しく選ばせない: wasm の置き場が決まるまで配信物に入らない (2026-11-06)。既にある設定は表示だけ残す */}
+            {draft.kind === "litert-local" && <option value="litert-local">{DEFAULT_LABEL["litert-local"]}</option>}
+            <option value="mock">モック</option>
           </select></label>
           <label className="field"><span>表示名</span><input value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} required /></label>
-          <label className="field"><span>APIキー</span><input type="password" autoComplete="off" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={draft.kind === "mock" ? "不要" : "端末内に保存"} disabled={draft.kind === "mock"} /></label>
-          <label className="field"><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} required /></label>
-          <label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /><small>会話に使うモデルはパートナーごとに選びます。パートナー画面の「モデルID」で変更してください。</small></label>
+          <label className="field"><span>APIキー</span><input type="password" autoComplete="off" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={requiresApiKey(draft.kind) ? "端末内に保存" : "不要"} disabled={!requiresApiKey(draft.kind)} /></label>
+          {draft.kind !== "litert-local" && <label className="field"><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} required /></label>}
+          {draft.kind === "litert-local"
+            ? <p className="field-help">端末内モデル（Gemma 4）は画像を生成できません。</p>
+            : <>
+                <label className="field"><span>画像モデルID</span><input value={draft.imageModel} onChange={(event) => setDraft({ ...draft, imageModel: event.target.value })} /><small>会話に使うモデルはパートナーごとに選びます。パートナー画面の「モデルID」で変更してください。</small></label>
+                <label className="field"><span>記憶の整理に使うモデル</span><input value={draft.lightModel ?? ""} onChange={(event) => setDraft({ ...draft, lightModel: event.target.value })} /><small>空なら会話のモデルを使います。</small></label>
+              </>}
+          {draft.kind === "litert-local" && !isWebGpuSupported() && <p className="field-warning">この端末またはブラウザは対応していません。会話を始めると失敗する可能性があります。</p>}
           {draft.kind === "gemini" && <label className="toggle"><input type="checkbox" checked={draft.geminiAutoCache} onChange={(event) => setDraft({ ...draft, geminiAutoCache: event.target.checked })} /><span><strong>Gemini 自動キャッシュ</strong><small>create → generate → delete。短い入力は通常コールへ戻します。</small></span></label>}
           {draft.kind === "anthropic" && <label className="field"><span>プロンプトキャッシュ</span><select value={draft.anthropicCacheTtl ?? "none"} onChange={(event) => setDraft({ ...draft, anthropicCacheTtl: event.target.value as AnthropicCacheTtl })}>
             <option value="none">なし (既定)</option>
@@ -99,8 +109,6 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
           <label className="field"><span>あなたの名前</span><input value={localSettings.userName} onChange={(event) => setLocalSettings({ ...localSettings, userName: event.target.value })} placeholder="未設定の場合は「あなた」と表示" /></label>
           <label className="field"><span>テーマ</span><select value={localSettings.theme} onChange={(event) => setLocalSettings({ ...localSettings, theme: event.target.value as AppSettings["theme"] })}><option value="system">端末に合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
-          <label className="field"><span>会話へ入れる直近メッセージ数</span><input type="number" min={4} max={200} value={localSettings.recentContextMessages} onChange={(event) => setLocalSettings({ ...localSettings, recentContextMessages: Number(event.target.value) })} /></label>
-          <p className="field-help">保存した記憶は固定されたシステムプロンプトの後、直近履歴の前に注入されます。ペルソナのツール定義は会話中に増減しません。</p>
           <button className="button" type="submit">アプリ設定を保存</button>
         </form>
         <div className="panel form-panel about-panel">

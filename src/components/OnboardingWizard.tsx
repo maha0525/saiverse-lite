@@ -7,6 +7,7 @@ import { API_KEY_GUIDES, type GuideProviderId } from "../apiKeyGuideData";
 import { newId, type AnthropicCacheTtl, type Persona, type ProviderConfig } from "../domain";
 import { importChatGptFile, importClaudeFile, type OfficialImportResult } from "../importers";
 import { PRIVACY_POLICY, TERMS_OF_USE } from "../legal";
+import type { PackImportProgress, PackImportResult } from "../pack/importPack";
 import {
   buildPersonaPrompt,
   completeOnboarding,
@@ -22,9 +23,11 @@ import {
 import type { LiteRepository } from "../storage/repository";
 import { ApiKeyGuide } from "./ApiKeyGuide";
 import { LegalModal } from "./LegalModal";
+import { packFailureText, packProgressText } from "./PackImportDialog";
 
 interface OnboardingWizardProps {
   repository: LiteRepository;
+  onImportPack(file: File, onProgress: (progress: PackImportProgress) => void): Promise<PackImportResult>;
   consentAlreadyGiven: boolean;
   consentOnly: boolean;
   onConsent(): Promise<void>;
@@ -63,11 +66,11 @@ const EXPORT_HOWTOS: Record<"chatgpt" | "claude" | "saiverse", ExportHowTo> = {
     ],
   },
   saiverse: {
-    title: "SAIVerse 本体からのエクスポート手順",
+    title: "SAIVerse 本体からの書き出し手順",
     steps: [
-      "本体のメモリ設定から、会話・記憶のエクスポート (saiverse_saimemory_v1) を書き出す",
-      "そのファイルを下のボタンで読み込む",
-      "アイコンやシステムプロンプトの一括持ち込みは本体側の対応を準備中。いまはこの画面で名前を決めてください",
+      "本体で、連れてきたい子の記憶の画面を開く",
+      "「引っ越し」タブから、ペルソナまるごとパックを書き出す",
+      "下のボタンで、その zip を そのまま 選ぶ (展開は不要)",
     ],
   },
 };
@@ -83,6 +86,7 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
   const [consentChecked, setConsentChecked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [packProgress, setPackProgress] = useState<PackImportProgress | null>(null);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const createdPersonaRef = useRef<Persona | null>(null);
 
@@ -131,28 +135,37 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
     return persona;
   };
 
-  const runImport = async (kind: "chatgpt" | "claude" | "saiverse-native", file: File) => {
+  const runImport = async (kind: "chatgpt" | "claude", file: File) => {
     setBusy(true);
     setNotice("");
     try {
       const persona = await ensurePersona(drafts.personaPrompt.trim() || IMPORT_PROMPT(drafts.personaName));
-      if (kind === "saiverse-native") {
-        const { importSaiverseMemory } = await import("../formats");
-        const imported = importSaiverseMemory(JSON.parse(await file.text()), persona.id);
-        for (const thread of imported.threads) await props.repository.putThread(thread);
-        for (const message of imported.messages) await props.repository.putMessage(message);
-        for (const memory of imported.memories) await props.repository.putMemory(memory);
-        setNotice(`${imported.threads.length}スレッド、${imported.messages.length}発言、${imported.memories.length}記憶を取り込みました。`);
-      } else {
-        const result: OfficialImportResult = kind === "chatgpt"
-          ? await importChatGptFile(props.repository, persona, file)
-          : await importClaudeFile(props.repository, persona, file);
-        const memoryNote = result.memories ? `、記憶 ${result.memories} 件` : "";
-        setNotice(`${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`);
-      }
+      const result: OfficialImportResult = kind === "chatgpt"
+        ? await importChatGptFile(props.repository, persona, file)
+        : await importClaudeFile(props.repository, persona, file);
+      const memoryNote = result.memories ? `、記憶 ${result.memories} 件` : "";
+      setNotice(`${result.threads}会話、${result.messages}発言${memoryNote}を取り込みました。`);
     } catch (error) {
       setNotice(`取り込めませんでした: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      setBusy(false);
+    }
+  };
+
+  // The persona arrives on the mock provider. The brain step gives it the real one.
+  const runPackImport = async (file: File) => {
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await props.onImportPack(file, setPackProgress);
+      createdPersonaRef.current = (await props.repository.getPersona(result.personaId)) ?? null;
+      patchDrafts({ personaId: result.personaId, personaName: result.personaName });
+      setNotice(`${result.personaName}が来ました。会話 ${result.threads}件、発言 ${result.messages}件、記憶 ${result.pages}件を取り込みました。本体の${result.personaName}は動かさないでください。両方で動かすと記憶が分かれます。`);
+    } catch (error) {
+      console.error("[SAIVerse Lite][pack] import failed", error);
+      setNotice(packFailureText(error));
+    } finally {
+      setPackProgress(null);
       setBusy(false);
     }
   };
@@ -188,7 +201,8 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
         ...defaults,
       };
       await props.repository.putProvider(provider);
-      const persona = createdPersonaRef.current;
+      // The wizard survives a reload, the ref does not.
+      const persona = createdPersonaRef.current ?? (drafts.personaId ? await props.repository.getPersona(drafts.personaId) : undefined);
       if (persona) {
         const updated = { ...persona, providerId: provider.id, model: provider.defaultModel, updatedAt: now };
         await props.repository.putPersona(updated);
@@ -216,10 +230,10 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
     }
   };
 
-  const fileButton = (label: string, kind: "chatgpt" | "claude" | "saiverse-native", accept: string) => (
+  const fileButton = (label: string, accept: string, onFile: (file: File) => void) => (
     <label className={busy ? "button secondary file-button" : "button file-button"}>
       {label}
-      <input type="file" accept={accept} disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) void runImport(kind, file); event.currentTarget.value = ""; }} />
+      <input type="file" accept={accept} disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) onFile(file); event.currentTarget.value = ""; }} />
     </label>
   );
 
@@ -295,8 +309,8 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
             {howto(EXPORT_HOWTOS.chatgpt)}
             {howto(EXPORT_HOWTOS.claude)}
             <div className="wizard-actions column">
-              {fileButton("ChatGPT のエクスポートを選ぶ", "chatgpt", "application/json,.json,application/zip,.zip")}
-              {fileButton("Claude のエクスポートを選ぶ", "claude", "application/json,.json,application/zip,.zip")}
+              {fileButton("ChatGPT のエクスポートを選ぶ", "application/json,.json,application/zip,.zip", (file) => void runImport("chatgpt", file))}
+              {fileButton("Claude のエクスポートを選ぶ", "application/json,.json,application/zip,.zip", (file) => void runImport("claude", file))}
             </div>
             {notice && <p className="notice" role="status">{notice}</p>}
             <div className="wizard-actions">
@@ -309,15 +323,15 @@ export function OnboardingWizard(props: OnboardingWizardProps) {
         {state.step === "path" && drafts.fork === "import-saiverse" && (
           <section className="wizard-screen">
             <h1>SAIVerse から連れてくる</h1>
-            <label className="field"><span>この子の呼び名</span><input value={drafts.personaName} onChange={(event) => patchDrafts({ personaName: event.target.value })} placeholder="本体で使っている名前" /></label>
             {howto(EXPORT_HOWTOS.saiverse)}
             <div className="wizard-actions column">
-              {fileButton("本体のエクスポートを選ぶ", "saiverse-native", "application/json,.json")}
+              {fileButton("ペルソナまるごとパックを選ぶ", "application/zip,.zip", (file) => void runPackImport(file))}
             </div>
+            {packProgress && <p className="field-help" role="status">{packProgressText(packProgress)}</p>}
             {notice && <p className="notice" role="status">{notice}</p>}
             <div className="wizard-actions">
-              <button className="text-button" onClick={() => setStep("fork")}><ArrowLeft size={14} /> 戻る</button>
-              <button className="button" disabled={busy} onClick={() => setStep("brain")}>つぎへ<ArrowRight size={16} /></button>
+              <button className="text-button" disabled={busy} onClick={() => setStep("fork")}><ArrowLeft size={14} /> 戻る</button>
+              <button className="button" disabled={busy || !drafts.personaId} onClick={() => setStep("brain")}>つぎへ<ArrowRight size={16} /></button>
             </div>
           </section>
         )}

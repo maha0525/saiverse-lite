@@ -1,14 +1,14 @@
-import type { ProviderConfig, ToolId } from "../domain";
+import { randomId, type ProviderConfig, type ToolId } from "../domain";
 import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
-import { assertOk, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
+import { assertOk, type CompletionRequest, type CompletionResult, type ImageGenerationResult, type LlmProvider, type ProviderEvent, type ProviderMessage, type ProviderRequest } from "./types";
 
 interface GeminiPart { [key: string]: unknown }
 interface GeminiContent { role: "user" | "model"; parts: GeminiPart[] }
 
 function geminiMessages(messages: ProviderMessage[], memoryContext: string): GeminiContent[] {
   const result: GeminiContent[] = [];
-  if (memoryContext) result.push({ role: "user", parts: [{ text: `【長期記憶（システム提供）】\n${memoryContext}` }] });
+  if (memoryContext) result.push({ role: "user", parts: [{ text: memoryContext }] });
   // Calls saved before signatures were captured cannot be replayed as
   // functionCall parts - Gemini 3.x rejects the whole turn with 400. Rendering
   // those as plain text keeps existing threads usable and keeps the information,
@@ -62,11 +62,20 @@ function toolConfig(request: ProviderRequest): Record<string, unknown>[] {
   }];
 }
 
+function toolFields(request: ProviderRequest): Record<string, unknown> {
+  return {
+    tools: toolConfig(request),
+    toolConfig: { functionCallingConfig: { mode: request.toolChoice === "none" ? "NONE" : "AUTO" } },
+  };
+}
+
 function approxTokens(systemPrompt: string, contents: GeminiContent[]): number {
   return Math.floor((systemPrompt.length + JSON.stringify(contents).length) / 4);
 }
 
 export class GeminiProvider implements LlmProvider {
+  readonly supportsStructuredOutput = true;
+
   constructor(readonly config: ProviderConfig) {}
 
   private headers(): HeadersInit { return { "content-type": "application/json", "x-goog-api-key": this.config.apiKey }; }
@@ -83,7 +92,7 @@ export class GeminiProvider implements LlmProvider {
           displayName: `saiverse-lite-${Date.now()}`,
           systemInstruction: { parts: [{ text: request.systemPrompt }] },
           contents: prefix,
-          tools: toolConfig(request),
+          ...toolFields(request),
           ttl: "300s",
         }),
         signal: request.signal ?? null,
@@ -116,13 +125,11 @@ export class GeminiProvider implements LlmProvider {
     const contents = geminiMessages(request.messages, request.memoryContext);
     const prefix = contents.slice(0, -1);
     const cacheName = await this.createCache(request, prefix);
-    const body: Record<string, unknown> = {
-      contents: cacheName ? contents.slice(-1) : contents,
-      tools: toolConfig(request),
-      toolConfig: { functionCallingConfig: { mode: request.toolChoice === "none" ? "NONE" : "AUTO" } },
-    };
-    if (cacheName) body.cachedContent = cacheName;
-    else body.systemInstruction = { parts: [{ text: request.systemPrompt }] };
+    // A request naming a cache is refused if it also sets system_instruction,
+    // tools or tool_config: those live in the cache.
+    const body: Record<string, unknown> = cacheName
+      ? { contents: contents.slice(-1), cachedContent: cacheName }
+      : { contents, ...toolFields(request), systemInstruction: { parts: [{ text: request.systemPrompt }] } };
     try {
       const response = await fetchWithRetry(this.api(`models/${encodeURIComponent(request.model)}:streamGenerateContent?alt=sse`), {
         method: "POST",
@@ -149,7 +156,7 @@ export class GeminiProvider implements LlmProvider {
               yield {
                 type: "tool-call",
                 call: {
-                  id: `gemini_${crypto.randomUUID()}`,
+                  id: `gemini_${randomId()}`,
                   name: fn.name as ToolId,
                   arguments: typeof fn.args === "object" && fn.args !== null ? fn.args as Record<string, unknown> : {},
                   ...(typeof signature === "string" && signature ? { thoughtSignature: signature } : {}),
@@ -171,6 +178,39 @@ export class GeminiProvider implements LlmProvider {
     } finally {
       if (cacheName) await this.deleteCache(cacheName);
     }
+  }
+
+  async complete(request: CompletionRequest): Promise<CompletionResult> {
+    const generationConfig: Record<string, unknown> = {};
+    if (request.maxOutputTokens !== undefined) generationConfig.maxOutputTokens = request.maxOutputTokens;
+    if (request.responseSchema) {
+      generationConfig.responseMimeType = "application/json";
+      // Full JSON Schema, as parametersJsonSchema is for tools.
+      generationConfig.responseJsonSchema = request.responseSchema;
+    }
+    const body: Record<string, unknown> = {
+      contents: geminiMessages(request.messages, request.memoryContext),
+      generationConfig,
+    };
+    if (request.systemPrompt) body.systemInstruction = { parts: [{ text: request.systemPrompt }] };
+    const response = await fetchWithRetry(this.api(`models/${encodeURIComponent(request.model)}:generateContent`), {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(body),
+      signal: request.signal ?? null,
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
+    await assertOk(response, this.config.label, request.model);
+    const payload = await response.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
+    };
+    const parts = payload.candidates?.[0]?.content?.parts ?? [];
+    return {
+      text: parts.filter((part) => !part.thought).map((part) => part.text ?? "").join(""),
+      inputTokens: Number(payload.usageMetadata?.promptTokenCount ?? 0),
+      outputTokens: Number(payload.usageMetadata?.candidatesTokenCount ?? 0),
+      cachedTokens: Number(payload.usageMetadata?.cachedContentTokenCount ?? 0),
+    };
   }
 
   async generateImage(prompt: string, signal?: AbortSignal, onRetry?: RetryNotice): Promise<ImageGenerationResult> {

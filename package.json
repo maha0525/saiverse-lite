@@ -13,9 +13,12 @@
     "typecheck": "tsc -b --pretty false",
     "deploy": "vitest run && tsc -b && vite build && wrangler deploy",
     "deploy:dry-run": "vitest run && tsc -b && vite build && wrangler deploy --dry-run",
-    "licenses:gen": "node scripts/gen-licenses.mjs"
+    "licenses:gen": "node scripts/gen-licenses.mjs",
+    "wasm:copy": "node scripts/copy-litertlm-wasm.mjs"
   },
   "dependencies": {
+    "@litert-lm/core": "0.15.0",
+    "@zip.js/zip.js": "2.24.0",
     "idb": "^8.0.3",
     "jszip": "^3.10.1",
     "lucide-react": "^1.24.0",

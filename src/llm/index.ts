@@ -1,6 +1,7 @@
 import type { ProviderConfig } from "../domain";
 import { AnthropicProvider } from "./anthropic";
 import { GeminiProvider } from "./gemini";
+import { LiteRtLocalProvider } from "./litertLocal";
 import { MockProvider } from "./mock";
 import { OpenAiProvider } from "./openai";
 import type { LlmProvider } from "./types";
@@ -13,5 +14,6 @@ export function createProvider(config: ProviderConfig): LlmProvider {
     case "openai":
     case "openai-compatible":
       return new OpenAiProvider(config);
+    case "litert-local": return new LiteRtLocalProvider(config);
   }
 }

@@ -17,7 +17,7 @@ SAIVerse 本体リポジトリと `~/.saiverse` には書き込んでいませ�
 `navigator.storage.persist()` を要求します。バックアップ復元が全ストアを置換するため、
 形式の検証後にだけ restore を実行します。
 
-API キーは provider レコードに端末内保存しますが、`saiverse_lite_backup_v1` の生成時に
+API キーは provider レコードに端末内保存しますが、`saiverse_lite_backup_v2` の生成時に
 必ず空文字へ置換します。
 
 ### 互換形式

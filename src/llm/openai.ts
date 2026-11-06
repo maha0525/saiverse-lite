@@ -1,8 +1,13 @@
-import type { ProviderConfig, ToolCall, ToolId } from "../domain";
+import { randomId, type ProviderConfig, type ToolCall, type ToolId } from "../domain";
 import { fetchWithRetry, type RetryNotice } from "./retry";
 import { readSse, safeJson } from "./sse";
 import {
   assertOk,
+  closeJsonSchema,
+  ProviderHttpError,
+  StructuredOutputRefusedError,
+  type CompletionRequest,
+  type CompletionResult,
   type ImageGenerationResult,
   type LlmProvider,
   type ProviderEvent,
@@ -50,11 +55,9 @@ function openAiResponseItems(message: ProviderMessage): Record<string, unknown>[
   });
 }
 
-function responseInputItems(request: ProviderRequest): Record<string, unknown>[] {
+function responseInputItems(request: Pick<ProviderRequest, "memoryContext" | "messages">): Record<string, unknown>[] {
   const input: Record<string, unknown>[] = [];
-  if (request.memoryContext) {
-    input.push({ role: "developer", content: `【長期記憶】\n${request.memoryContext}` });
-  }
+  if (request.memoryContext) input.push({ role: "user", content: request.memoryContext });
   for (const message of request.messages) {
     if (message.role === "user") {
       input.push({ role: "user", content: message.content });
@@ -117,7 +120,21 @@ interface ToolAccumulator {
   arguments: string;
 }
 
+function chatMessages(request: Pick<ProviderRequest, "systemPrompt" | "memoryContext" | "messages">): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [];
+  if (request.systemPrompt) messages.push({ role: "system", content: request.systemPrompt });
+  if (request.memoryContext) messages.push({ role: "user", content: request.memoryContext });
+  messages.push(...request.messages.map(openAiMessage));
+  return messages;
+}
+
+const STRUCTURED_OUTPUT_NAME = "structured_output";
+/** The answers of a server that does not take `response_format`. Auth, rate and server errors stay failures. */
+const STRUCTURED_OUTPUT_REFUSED_STATUSES = new Set([400, 422, 501]);
+
 export class OpenAiProvider implements LlmProvider {
+  readonly supportsStructuredOutput = true;
+
   constructor(readonly config: ProviderConfig) {}
 
   async *stream(request: ProviderRequest): AsyncGenerator<ProviderEvent> {
@@ -126,6 +143,83 @@ export class OpenAiProvider implements LlmProvider {
       return;
     }
     yield* this.streamChatCompletions(request);
+  }
+
+  complete(request: CompletionRequest): Promise<CompletionResult> {
+    return this.config.kind === "openai" ? this.completeResponses(request) : this.completeChat(request);
+  }
+
+  private async completeResponses(request: CompletionRequest): Promise<CompletionResult> {
+    const body: Record<string, unknown> = {
+      model: request.model,
+      input: responseInputItems(request),
+      store: false,
+    };
+    if (request.systemPrompt) body.instructions = request.systemPrompt;
+    if (request.maxOutputTokens !== undefined) body.max_output_tokens = request.maxOutputTokens;
+    if (request.responseSchema) {
+      body.text = {
+        format: { type: "json_schema", name: STRUCTURED_OUTPUT_NAME, schema: closeJsonSchema(request.responseSchema), strict: true },
+      };
+    }
+    const response = await fetchWithRetry(endpoint(this.config.baseUrl, "/responses"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.config.apiKey}` },
+      body: JSON.stringify(body),
+      signal: request.signal ?? null,
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
+    await assertOk(response, this.config.label, request.model);
+    const payload = await response.json() as {
+      output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+      usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
+    };
+    const text = (payload.output ?? [])
+      .filter((item) => item.type === "message")
+      .flatMap((item) => item.content ?? [])
+      .filter((part) => part.type === "output_text")
+      .map((part) => part.text ?? "")
+      .join("");
+    return {
+      text,
+      inputTokens: Number(payload.usage?.input_tokens ?? 0),
+      outputTokens: Number(payload.usage?.output_tokens ?? 0),
+      cachedTokens: Number(payload.usage?.input_tokens_details?.cached_tokens ?? 0),
+    };
+  }
+
+  private async completeChat(request: CompletionRequest): Promise<CompletionResult> {
+    const body: Record<string, unknown> = { model: request.model, messages: chatMessages(request) };
+    if (request.maxOutputTokens !== undefined) body.max_tokens = request.maxOutputTokens;
+    if (request.responseSchema) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: { name: STRUCTURED_OUTPUT_NAME, schema: closeJsonSchema(request.responseSchema), strict: true },
+      };
+    }
+    const response = await fetchWithRetry(endpoint(this.config.baseUrl, "/chat/completions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.config.apiKey}` },
+      body: JSON.stringify(body),
+      signal: request.signal ?? null,
+    }, request.onRetry ? { onRetry: request.onRetry } : undefined);
+    try {
+      await assertOk(response, this.config.label, request.model);
+    } catch (error) {
+      if (request.responseSchema && error instanceof ProviderHttpError && STRUCTURED_OUTPUT_REFUSED_STATUSES.has(error.status)) {
+        throw new StructuredOutputRefusedError(error);
+      }
+      throw error;
+    }
+    const payload = await response.json() as {
+      choices?: Array<{ message?: { content?: string | null } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+    };
+    return {
+      text: payload.choices?.[0]?.message?.content ?? "",
+      inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
+      outputTokens: Number(payload.usage?.completion_tokens ?? 0),
+      cachedTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+    };
   }
 
   private async *streamResponses(request: ProviderRequest): AsyncGenerator<ProviderEvent> {
@@ -204,12 +298,9 @@ export class OpenAiProvider implements LlmProvider {
   }
 
   private async *streamChatCompletions(request: ProviderRequest): AsyncGenerator<ProviderEvent> {
-    const messages: Record<string, unknown>[] = [{ role: "system", content: request.systemPrompt }];
-    if (request.memoryContext) messages.push({ role: "system", content: `【長期記憶】\n${request.memoryContext}` });
-    messages.push(...request.messages.map(openAiMessage));
     const body: Record<string, unknown> = {
       model: request.model,
-      messages,
+      messages: chatMessages(request),
       stream: true,
       tools: request.tools.map((tool) => ({
         type: "function",
@@ -260,7 +351,7 @@ export class OpenAiProvider implements LlmProvider {
       yield {
         type: "tool-call",
         call: {
-          id: call.id || `call_${crypto.randomUUID()}`,
+          id: call.id || `call_${randomId()}`,
           name: call.name as ToolId,
           arguments: safeJson(call.arguments) ?? {},
         },

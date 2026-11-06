@@ -1,10 +1,13 @@
 import JSZip from "jszip";
 import {
+  createChatMessage,
   newId,
-  type ChatMessage,
   type ConversationThread,
   type Persona,
 } from "./domain";
+import type { ImportedNativeData } from "./formats";
+import { CATEGORY_CORE, isCoreMemoryPage } from "./pageRecords";
+import { coreDraftsFromMemories } from "./storage/legacyData";
 import type { LiteRepository } from "./storage/repository";
 
 export type ImportSource = "chatgpt" | "claude";
@@ -292,24 +295,25 @@ export async function saveClaudeMemories(
   persona: Persona,
   memoryTexts: ClaudeMemoryText[],
 ): Promise<number> {
-  const existingIds = new Set((await repository.listMemories(persona.id)).map((memory) => memory.id));
+  const existing = (await repository.listPages(persona.id, CATEGORY_CORE)).filter(isCoreMemoryPage);
+  const existingIds = new Set(existing.map((page) => page.id));
   const safePersonaId = persona.id.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const now = Date.now();
-  for (const memory of memoryTexts) {
-    const id = existingIds.has(memory.id) ? memory.id : `${memory.id}_${safePersonaId}`;
-    await repository.putMemory({
-      id,
-      personaId: persona.id,
-      threadId: null,
-      kind: "note",
-      content: memory.text,
-      sourceMessageIds: [],
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
+  await repository.addCoreMemories(persona.id, memoryTexts.map((memory) => ({
+    id: existingIds.has(memory.id) ? memory.id : `${memory.id}_${safePersonaId}`,
+    content: memory.text,
+  })));
   console.info("[SAIVerse Lite][import] Claude memories stored", { personaId: persona.id, memories: memoryTexts.length });
   return memoryTexts.length;
+}
+
+/** Stores a parsed `saiverse_saimemory_v1` file: its memo rows become core memories. */
+export async function saveSaiverseMemoryImport(
+  repository: LiteRepository,
+  personaId: string,
+  imported: ImportedNativeData,
+): Promise<void> {
+  await repository.writePersonaRecords(personaId, { threads: imported.threads, messages: imported.messages });
+  await repository.addCoreMemories(personaId, coreDraftsFromMemories(imported.memories));
 }
 
 export async function saveImportedConversations(
@@ -318,6 +322,7 @@ export async function saveImportedConversations(
   conversations: ImportedConversation[],
 ): Promise<{ threads: number; messages: number }> {
   let messageCount = 0;
+  let seq = await repository.nextMessageSeq(persona.id);
   for (const conversation of conversations) {
     const now = Date.now();
     const safeConversationId = conversation.id.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -345,7 +350,7 @@ export async function saveImportedConversations(
     for (let index = 0; index < conversation.messages.length; index += 1) {
       const imported = conversation.messages[index];
       if (!imported || (imported.role !== "user" && imported.role !== "assistant")) continue;
-      const message: ChatMessage = {
+      const message = createChatMessage({
         id: imported.sourceId
           ? usesLegacyIds
             ? `message_import_${conversation.source}_${imported.sourceId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
@@ -356,17 +361,16 @@ export async function saveImportedConversations(
         role: imported.role,
         content: imported.content,
         createdAt: imported.createdAt ?? createdAt + index,
-        editedAt: null,
-        toolCallId: null,
-        toolName: null,
+        seq,
         metadata: {
           ...imported.metadata,
           tags: ["conversation", "imported", conversation.source],
           import_source_id: imported.sourceId,
           import_conversation_id: conversation.id,
         },
-      };
+      });
       await repository.putMessage(message);
+      seq += 1;
       messageCount += 1;
     }
   }

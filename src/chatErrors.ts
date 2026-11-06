@@ -8,11 +8,23 @@ export class ChatOperationError extends Error {
     readonly originalError: unknown,
     readonly rollbackSucceeded: boolean,
     readonly rollbackError: unknown = null,
+    /** The turn had already changed the persona's memory, so its rows stayed in the history. */
+    readonly keptTurn = false,
+    /** False when a regeneration had no response to replace and only continued the turn. */
+    readonly replacedResponse = true,
   ) {
     super(originalError instanceof Error ? originalError.message : String(originalError), {
       cause: originalError,
     });
     this.name = "ChatOperationError";
+  }
+}
+
+/** Nothing was written, so there is nothing to roll back. */
+export class PersonaImportingError extends Error {
+  constructor() {
+    super("このペルソナは取り込みの途中です。取り込みが終わると話せます");
+    this.name = "PersonaImportingError";
   }
 }
 
@@ -33,10 +45,20 @@ function rawError(error: unknown): string {
 
 function operationState(error: ChatOperationError | null, operation: ChatOperation): string {
   if (!error) return "";
+  if (error.keptTurn && error.rollbackSucceeded) {
+    return operation === "send" || !error.replacedResponse
+      ? "途中で記憶への書き込みが済んでいたので、ここまでのやり取りは履歴に残しています。"
+      : "途中で記憶への書き込みが済んでいたので、元の返答と今回のやり取りのどちらも履歴に残しています。";
+  }
   if (operation === "send") {
     return error.rollbackSucceeded
       ? "送信内容は履歴に残さず、入力欄へ戻しました。"
       : "送信内容は入力欄へ戻しましたが、履歴の巻き戻しに失敗した可能性があります。技術的な詳細を添えてサポートへご連絡ください。";
+  }
+  if (!error.replacedResponse) {
+    return error.rollbackSucceeded
+      ? "ここまでのやり取りはそのまま残しています。"
+      : "履歴の巻き戻しに失敗した可能性があります。技術的な詳細を添えてサポートへご連絡ください。";
   }
   return error.rollbackSucceeded
     ? "元の返答はそのまま残しています。"
@@ -128,6 +150,14 @@ export function presentChatError(error: unknown, fallbackOperation: ChatOperatio
         detail,
       };
     }
+  }
+
+  if (original instanceof PersonaImportingError) {
+    return {
+      title: "取り込みが終わっていません",
+      message: "本体で書き出した同じ ZIP を選ぶと、続きから入ります。終わると話せるようになります。",
+      detail,
+    };
   }
 
   const originalMessage = original instanceof Error ? original.message : String(original);

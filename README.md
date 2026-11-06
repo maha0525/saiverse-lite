@@ -78,6 +78,10 @@ Gemma 4 E2B / E4B を PWA 上でオンデバイス実行する調査結果と実
 本番Worker名は `saiverse-lite`、配信対象は Vite が生成する `dist/` です。
 `app.saiverse.net` のCustom DomainはCloudflare側の既存Worker設定を使用します。
 
+`public/litertlm-wasm/`（`corepack pnpm wasm:copy` が作る端末内モデルの wasm）がある状態ではデプロイできません。
+wasm が各 30.5MiB で、Workers の 1 ファイル 25MiB の上限を超えるためです。置き場が決まるまで端末内モデルは
+設定画面で新しく選べないようにしてあるので、デプロイの前にこのフォルダを消してください。
+
 初回のみ、CloudflareアカウントをOAuth認証します。Windowsでは資格情報を
 Credential Managerへ暗号化保存するため、`--use-keyring` を指定してください。
 

@@ -1,16 +1,24 @@
 import {
-  isRetiredAutomaticSummary,
+  createChatMessage,
   normalizeSettings,
+  randomId,
   type ChatMessage,
   type ConversationThread,
+  type FragmentRecord,
   type MemoryEntry,
+  type MessageRole,
+  type PageRecord,
   type Persona,
+  type PersonaSession,
   type RepositorySnapshot,
 } from "./domain";
+import { epochSeconds, isCoreMemoryPage } from "./pageRecords";
+import { upgradeLegacyMessage, upgradeLegacyRecords, type LegacyChatMessage } from "./storage/legacyData";
 
 export const PERSONA_FORMAT = "saiverse_lite_persona_v1" as const;
 export const MEMORY_FORMAT = "saiverse_saimemory_v1" as const;
-export const BACKUP_FORMAT = "saiverse_lite_backup_v1" as const;
+export const BACKUP_FORMAT = "saiverse_lite_backup_v2" as const;
+export const LEGACY_BACKUP_FORMAT = "saiverse_lite_backup_v1" as const;
 
 export interface SaiverseBlueprintPayload {
   name: string;
@@ -68,10 +76,6 @@ function iso(now: number): string {
   return new Date(now).toISOString();
 }
 
-function epochSeconds(value: number): number {
-  return Math.floor(value / 1000);
-}
-
 function withTags(metadata: Record<string, unknown>, tags: string[]): Record<string, unknown> {
   const existing = Array.isArray(metadata.tags) ? metadata.tags.filter((tag): tag is string => typeof tag === "string") : [];
   return { ...metadata, tags: [...new Set([...existing, ...tags])] };
@@ -114,8 +118,6 @@ function exportConversationThread(
           lite_message_id: message.id,
           lite_thread_id: thread.id,
           edited_at: message.editedAt === null ? null : iso(message.editedAt),
-          tool_call_id: message.toolCallId,
-          tool_name: message.toolName,
         },
         ["conversation", "saiverse_lite"],
       ),
@@ -123,26 +125,27 @@ function exportConversationThread(
   };
 }
 
-function exportMemoryThread(persona: Persona, memories: MemoryEntry[]): NativeThread {
-  const updatedAt = memories.reduce((max, memory) => Math.max(max, memory.updatedAt), persona.updatedAt);
+/** Pages hold epoch seconds; `updated_at` stays the ISO text this format has always carried. */
+function exportMemoryThread(persona: Persona, memories: PageRecord[]): NativeThread {
+  const updatedAt = memories.reduce((max, memory) => Math.max(max, memory.updatedAt), epochSeconds(persona.updatedAt));
   return {
     thread_id: `${persona.id}:lite-memory`,
     resource_id: persona.id,
     overview: "SAIVerse Lite long-term memory",
-    overview_updated_at: epochSeconds(updatedAt),
+    overview_updated_at: updatedAt,
     stelis: null,
     messages: memories.map((memory) => ({
       id: memory.id,
       role: "assistant",
       content: memory.content,
       resource_id: persona.id,
-      created_at: epochSeconds(memory.createdAt),
+      created_at: memory.createdAt,
       metadata: {
         tags: ["memory", "note", "saiverse_lite"],
         lite_memory_id: memory.id,
-        lite_thread_id: memory.threadId,
-        source_message_ids: memory.sourceMessageIds,
-        updated_at: iso(memory.updatedAt),
+        lite_thread_id: stringOrNull(memory.metadata.lite_thread_id),
+        source_message_ids: Array.isArray(memory.metadata.source_message_ids) ? memory.metadata.source_message_ids : [],
+        updated_at: iso(memory.updatedAt * 1000),
       },
     })),
   };
@@ -152,7 +155,7 @@ export function exportSaiverseMemory(
   persona: Persona,
   threads: ConversationThread[],
   messages: ChatMessage[],
-  memories: MemoryEntry[],
+  pages: PageRecord[],
   now = Date.now(),
 ): SaiverseMemoryExport {
   const nativeThreads = threads
@@ -162,9 +165,8 @@ export function exportSaiverseMemory(
       thread,
       messages.filter((message) => message.threadId === thread.id),
     ));
-  if (memories.some((memory) => memory.personaId === persona.id)) {
-    nativeThreads.push(exportMemoryThread(persona, memories.filter((memory) => memory.personaId === persona.id)));
-  }
+  const memories = pages.filter((page) => page.personaId === persona.id && isCoreMemoryPage(page) && !page.isDeleted);
+  if (memories.length > 0) nativeThreads.push(exportMemoryThread(persona, memories));
   return {
     format: MEMORY_FORMAT,
     exported_at: iso(now),
@@ -180,7 +182,6 @@ export function exportFullBackup(snapshot: RepositorySnapshot, now = Date.now())
     includes_api_keys: false,
     data: {
       ...structuredClone(snapshot),
-      memories: snapshot.memories.filter((memory) => !isRetiredAutomaticSummary(memory)),
       providers: snapshot.providers.map((provider) => ({ ...provider, apiKey: "" })),
       settings: normalizeSettings(snapshot.settings),
     },
@@ -196,20 +197,35 @@ function requireArray(value: unknown, label: string): unknown[] {
   return value;
 }
 
-export function parseFullBackup(value: unknown): RepositorySnapshot {
-  if (!isRecord(value) || value.format !== BACKUP_FORMAT || !isRecord(value.data)) {
+export function parseFullBackup(value: unknown, now = Date.now()): RepositorySnapshot {
+  if (!isRecord(value) || (value.format !== BACKUP_FORMAT && value.format !== LEGACY_BACKUP_FORMAT) || !isRecord(value.data)) {
     throw new Error(`Unsupported backup format (expected ${BACKUP_FORMAT})`);
   }
   const data = value.data;
-  const settings = normalizeSettings(data.settings);
-  return {
-    personas: requireArray(data.personas, "data.personas") as Persona[],
-    threads: requireArray(data.threads, "data.threads") as ConversationThread[],
-    messages: requireArray(data.messages, "data.messages") as ChatMessage[],
-    memories: requireArray(data.memories, "data.memories")
-      .filter((memory) => !isRetiredAutomaticSummary(memory)) as MemoryEntry[],
+  const personas = requireArray(data.personas, "data.personas") as Persona[];
+  const threads = requireArray(data.threads, "data.threads") as ConversationThread[];
+  const common = {
+    personas,
+    threads,
     providers: requireArray(data.providers, "data.providers").map((item) => ({ ...(item as object), apiKey: "" })) as RepositorySnapshot["providers"],
-    settings,
+    settings: normalizeSettings(data.settings),
+  };
+  if (value.format === LEGACY_BACKUP_FORMAT) {
+    const upgraded = upgradeLegacyRecords(
+      personas,
+      threads,
+      requireArray(data.messages, "data.messages") as LegacyChatMessage[],
+      requireArray(data.memories, "data.memories") as MemoryEntry[],
+      epochSeconds(now),
+    );
+    return { ...common, ...upgraded, fragments: [] };
+  }
+  return {
+    ...common,
+    messages: requireArray(data.messages, "data.messages") as ChatMessage[],
+    pages: requireArray(data.pages, "data.pages") as PageRecord[],
+    fragments: requireArray(data.fragments, "data.fragments") as FragmentRecord[],
+    sessions: requireArray(data.sessions, "data.sessions") as PersonaSession[],
   };
 }
 
@@ -224,6 +240,32 @@ function metadataOf(value: unknown): Record<string, unknown> {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+const STORED_ROLES: readonly string[] = ["user", "assistant", "system", "host"] satisfies MessageRole[];
+
+// Exports of this format written before database v2 hold role "tool" rows and
+// tool-call fields; those take the same conversion as the database migration.
+function importNativeMessage(
+  rawMessage: Record<string, unknown>,
+  threadId: string,
+  personaId: string,
+  seq: number,
+): ChatMessage {
+  const { tool_call_id: _toolCallId, tool_name: toolName, tool_calls: _toolCalls, lite_provider_state: _providerState, ...metadata } = metadataOf(rawMessage.metadata);
+  const id = stringOrNull(metadata.lite_message_id) ?? stringOrNull(rawMessage.id) ?? `message_${randomId()}`;
+  const content = typeof rawMessage.content === "string" ? rawMessage.content : "";
+  const createdAt = fromEpoch(rawMessage.created_at);
+  const edited = typeof metadata.edited_at === "string" ? Date.parse(metadata.edited_at) : null;
+  const editedAt = edited !== null && Number.isFinite(edited) ? edited : null;
+  if (rawMessage.role === "tool") {
+    return upgradeLegacyMessage(
+      { id, threadId, personaId, role: "tool", content, createdAt, editedAt, toolCallId: null, toolName: stringOrNull(toolName), metadata },
+      seq,
+    );
+  }
+  const role = typeof rawMessage.role === "string" && STORED_ROLES.includes(rawMessage.role) ? rawMessage.role as MessageRole : "user";
+  return createChatMessage({ id, threadId, personaId, role, content, createdAt, seq, editedAt, lineRole: null, metadata });
 }
 
 export function importSaiverseMemory(value: unknown, targetPersonaId: string): ImportedNativeData {
@@ -248,7 +290,7 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
           retiredAutomaticSummaries += 1;
           continue;
         }
-        const id = stringOrNull(metadata.lite_memory_id) ?? stringOrNull(rawMessage.id) ?? `memory_${crypto.randomUUID()}`;
+        const id = stringOrNull(metadata.lite_memory_id) ?? stringOrNull(rawMessage.id) ?? `memory_${randomId()}`;
         const createdAt = fromEpoch(rawMessage.created_at);
         const updatedAt = typeof metadata.updated_at === "string" ? Date.parse(metadata.updated_at) : createdAt;
         memories.push({
@@ -285,22 +327,8 @@ export function importSaiverseMemory(value: unknown, targetPersonaId: string): I
     });
     for (const rawMessage of rawMessages) {
       if (!isRecord(rawMessage)) continue;
-      const metadata = metadataOf(rawMessage.metadata);
-      const role = rawMessage.role === "assistant" || rawMessage.role === "tool" ? rawMessage.role : "user";
-      const created = fromEpoch(rawMessage.created_at);
-      const editedAt = typeof metadata.edited_at === "string" ? Date.parse(metadata.edited_at) : null;
-      messages.push({
-        id: stringOrNull(metadata.lite_message_id) ?? stringOrNull(rawMessage.id) ?? `message_${crypto.randomUUID()}`,
-        threadId,
-        personaId: targetPersonaId,
-        role,
-        content: typeof rawMessage.content === "string" ? rawMessage.content : "",
-        createdAt: created,
-        editedAt: editedAt !== null && Number.isFinite(editedAt) ? editedAt : null,
-        toolCallId: stringOrNull(metadata.tool_call_id),
-        toolName: metadata.tool_name === "memory_recall" || metadata.tool_name === "image_generate" ? metadata.tool_name : null,
-        metadata,
-      });
+      // This format keeps whole seconds, so same-second rows rely on file order.
+      messages.push(importNativeMessage(rawMessage, threadId, targetPersonaId, messages.length + 1));
     }
   }
   if (retiredAutomaticSummaries > 0) {

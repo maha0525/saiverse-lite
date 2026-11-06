@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { newId, type ConversationThread, type Persona } from "./domain";
 import { ChatGptExportAdapter, ClaudeExportAdapter, extractClaudeMemories, saveClaudeMemories, saveImportedConversations } from "./importers";
+import { CATEGORY_CORE, liveCoreMemories } from "./pageRecords";
 import { MemoryRepository } from "./storage/memoryRepository";
 
 // 実データ (2026-07-15 検証) と同形の匿名フィクスチャ。値はすべて合成。
@@ -99,17 +100,35 @@ describe("official export adapters", () => {
     const repository = new MemoryRepository();
     const first = { ...testPersona(), id: "persona_first_memory" };
     const second = { ...testPersona(), id: "persona_second_memory" };
+    await repository.putPersona(first);
+    await repository.putPersona(second);
     const file = new File([JSON.stringify(CLAUDE_MEMORIES)], "memories.json", { type: "application/json" });
     const memories = await extractClaudeMemories(file);
 
     await saveClaudeMemories(repository, first, memories);
     await saveClaudeMemories(repository, second, memories);
 
-    const firstStored = await repository.listMemories(first.id);
-    const secondStored = await repository.listMemories(second.id);
+    const firstStored = liveCoreMemories(await repository.listPages(first.id, CATEGORY_CORE));
+    const secondStored = liveCoreMemories(await repository.listPages(second.id, CATEGORY_CORE));
     expect(firstStored).toHaveLength(2);
     expect(secondStored).toHaveLength(2);
     expect(firstStored.map((memory) => memory.id)).not.toEqual(secondStored.map((memory) => memory.id));
+  });
+
+  it("stores Claude memories as core memories and does not duplicate them on re-import", async () => {
+    const repository = new MemoryRepository();
+    const persona = testPersona();
+    await repository.putPersona(persona);
+    const memories = await extractClaudeMemories(new File([JSON.stringify(CLAUDE_MEMORIES)], "memories.json", { type: "application/json" }));
+
+    await saveClaudeMemories(repository, persona, memories);
+    await saveClaudeMemories(repository, persona, memories);
+
+    const stored = liveCoreMemories(await repository.listPages(persona.id, CATEGORY_CORE));
+    expect(stored).toHaveLength(2);
+    expect(stored.map((page) => page.metadata.core_id).sort()).toEqual([1, 2]);
+    expect(stored[0]).toMatchObject({ parentId: "root_core", isImportant: true });
+    expect(stored[0]?.metadata).toMatchObject({ kind: "note", confirmed: 1, deleted_at: null });
   });
 
   it("re-imports the same export without duplicating messages", async () => {

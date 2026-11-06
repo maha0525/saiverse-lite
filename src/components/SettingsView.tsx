@@ -77,7 +77,10 @@ export function SettingsView(props: SettingsViewProps) {
             {props.providers.map((provider) => <button type="button" key={provider.id} className={selectedId === provider.id ? "chip selected" : "chip"} onClick={() => setSelectedId(provider.id)}>{provider.label}</button>)}
           </div>
           <label className="field"><span>種類</span><select value={draft.kind} disabled={draft.id === "provider_mock"} onChange={(event) => setDraft(newProvider(event.target.value as ProviderKind))}>
-            <option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="openai-compatible">OpenAI互換URL</option><option value="litert-local">{DEFAULT_LABEL["litert-local"]}</option><option value="mock">モック</option>
+            <option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="openai-compatible">OpenAI互換URL</option>
+            {/* 端末内モデルは新しく選ばせない: wasm の置き場が決まるまで配信物に入らない (2026-11-06)。既にある設定は表示だけ残す */}
+            {draft.kind === "litert-local" && <option value="litert-local">{DEFAULT_LABEL["litert-local"]}</option>}
+            <option value="mock">モック</option>
           </select></label>
           <label className="field"><span>表示名</span><input value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} required /></label>
           <label className="field"><span>APIキー</span><input type="password" autoComplete="off" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={requiresApiKey(draft.kind) ? "端末内に保存" : "不要"} disabled={!requiresApiKey(draft.kind)} /></label>
